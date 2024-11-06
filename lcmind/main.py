@@ -3,7 +3,8 @@ import ctypes
 from   ctypes import windll
 import ctypes.wintypes
 import cv2
-from   dataclasses import dataclass
+from   dataclasses import dataclass, field
+import datetime
 import importlib
 import inspect
 import keyboard
@@ -18,15 +19,15 @@ import win32gui
 
 #FUTURE: remove pyautogui (no multi-monitor and bloated), win32gui, win32api, and keyboard
 #FUTURE: detect failures and decline run, if configured to
-#FUTURE: run in a vm, rdp wrap, or something to avoid stealing focus/mouse/keyboard
 
 '''Known bugs
-claim_battlepass: missed last mission. clicked too fast?
-battle_prepare_team: incorrectly identifies 3/5 team as 5/5
-battle_prepare_team: stuck with 1 character since meursault wasn't in list. verify working after fix
+battle_prepare_team: incorrectly identifies 3/5 team as 5/5. maybe misses 6/6 sometimes
+battle_prepare_team: fixed undoing rodion but need to verify fix
+
 job_stamina_buy_with_lunacy: stops at 7 resets when should be 9
 
 subjob_event_resolve: Event bespoke choices seem fragile? has been working so far though
+claim_battlepass: missed last mission. clicked too fast?
 '''
 
 ################################################################################
@@ -39,9 +40,10 @@ DISABLE_DPI_REQUIREMENT = False
 @dataclass
 class State:
     # Config
-    ai_team_mirror_sinner_priority: list[int] = (2,3,10,0,8,5, 1,6,7,9,11,8)
-    ai_team_lux_sinner_priority: list[int] = (2,3,10,0,1,5, 8,6,7,9,11,8)
+    ai_team_mirror_sinner_priority: list[str] = ('Don Quixote', 'Ryoushu', 'Outis', 'Yi Sang', 'Rodion', 'Hong Lu', 'Faust', 'Heathcliff', 'Ishmael', 'Sinclair', 'Meursult', 'Gregor')
+    ai_team_lux_sinner_priority: list[str] = ('Don Quixote', 'Ryoushu', 'Outis', 'Yi Sang', 'Rodion', 'Hong Lu', 'Faust', 'Heathcliff', 'Ishmael', 'Sinclair', 'Meursult', 'Gregor')
     stamina_daily_resets: int = 9
+    log_directory: str = 'R:/tmp/logs/limbus_company'
 
     ai_themes: bool = True
     ai_routing: bool = True
@@ -76,7 +78,10 @@ class State:
     stats_grind_runs_completed: int = 0
     stats_mirror_successes: int = 0
     stats_mirror_failures: int = 0
+    stats_mirror_started: int = 0
     stats_stamina_resets: int = 0
+    stats_battles_num: int = 0
+    stats_battles: dict = field( default_factory=lambda: {} ) # BattleName -> { turns, events, errors, completed }
 
     stats_dummy: int = 0
 
@@ -152,8 +157,11 @@ def log( msg='', level=None ):
         if job is None and frame.function.startswith( 'job_' ): job = frame.function[4:]
         if subjob is None and frame.function.startswith( 'subjob_' ): subjob = frame.function[7:]
     
+    mini_time = datetime.datetime.now( datetime.timezone.utc ).strftime( "%H-%M-%S-%f" )
+    if job and caller.startswith('job_'): caller = None # simplify tag for job base function
+    
     # Generate tag from meta info, then final text
-    tag = '.'.join( x for x in [level,job,caller] if x )
+    tag = '.'.join( x for x in [mini_time,level,job,caller] if x )
     tag = f'[{tag}]'
     text = f'{tag} {msg}'
 
@@ -164,12 +172,12 @@ def log( msg='', level=None ):
     elif level == 'WARNING':  text_colored = log_colorize_text( text, 'Magenta' )
     elif level == 'INFO':     text_colored = log_colorize_text( text, 'Yellow' ) # Green
     elif level == 'DEBUG':    text_colored = log_colorize_text( text, 'Cyan' ) # Blue
-    elif level == 'TRACE':    text_colored = log_colorize_text( text, 'White' )
+    elif level == 'TRACE':    text_colored = log_colorize_text( text, 'White', mode='Dim' )
 
     # Print to terminal and write to log file
     if level not in st.log_levels_disabled: print( text_colored )
-    with open( f'logs/console_{st.log_app_start_time}.txt', 'a' ) as f:
-        f.write( text +'\n' )
+    with open( f'{st.log_directory}/console_{st.log_app_start_time}.txt', 'a' ) as f:
+        f.write( text_colored +'\n' )
 
 ################################################################################
 ## Platform specific functionality for constructing basic image bot verbs
@@ -177,13 +185,13 @@ def log( msg='', level=None ):
 
 @dataclass
 class Window:
-    pos: Vec2 = Vec2(0,0)
-    size: Vec2 = Vec2(1280,720)
-    dpi: Vec2 = Vec2(144,144)
+    pos: Vec2 = field( default_factory=lambda: Vec2(0,0) )
+    size: Vec2 = field( default_factory=lambda: Vec2(1280,720) )
+    dpi: Vec2 = field( default_factory=lambda: Vec2(144,144) )
 
     hwnd: int = 0
     dc: int = 0
-    screen_size: Vec2 = Vec2(0,0)
+    screen_size: Vec2 = field( default_factory=lambda: Vec2(0,0) )
 
 def win_init():
     '''Find window and normalize it'''
@@ -475,16 +483,22 @@ def job_daily_thread():
 def battle_prepare_team():
     logi( 'start' )
     # Choose team order
+    sinners_in_order = ['Yi Sang', 'Faust', 'Don Quixote', 'Ryoushu', 'Meursult', 'Hong Lu', 'Heathcliff', 'Ishmael', 'Rodion', 'Sinclair', 'Outis', 'Gregor']
     sinner_priority_list = st.ai_team_mirror_sinner_priority if st.battle_team_type_mirror else st.ai_team_lux_sinner_priority
+    if len(set( sinner_priority_list )) != 12:
+        raise ValueError( 'Sinner priority list must contain all 12 sinners exactly once' )
     full_template = 'team/FullTeam66' if st.battle_team_type_mirror else 'team/FullTeam55'
-    if not find( full_template, threshold=0.90 ): # was 0.95 but having inconsistency
+    if not find( full_template, threshold=0.96 ):
         logd( 'Team not prepared, redoing selection' )
         click( 'team/ClearSelection', wait=0.8 )
         press( 'ENTER' )
         pos = find( 'team/Announcer', threshold=0.7, can_fail=False )
-        for idx in sinner_priority_list:
+        for sinner_name in sinner_priority_list:
+            idx = sinners_in_order.index( sinner_name )
             rel_pos = Vec2( (idx % 6 +1)* 140, (idx//6)*200 + 100 )
             input_mouse_click( Vec2(pos.x+rel_pos.x, pos.y+rel_pos.y) )
+        if not find( full_template, threshold=0.96 ):
+            loge( "Team seems to be undermanned. Either we're losing or detection is flawed" )
     else:
         logd( 'Team is already prepared' )
 
@@ -503,24 +517,30 @@ def battle_prepare_team():
 def battle_combat( battle_state_unknown_timeout=5 ):
     logi( 'start' )
     error_count = 0
+    stats = { 'turns':0, 'events':0, 'completed':False, 'errors':0 }
+    st.stats_battles_num += 1
+    st.stats_battles[ st.stats_battles_num ] = stats
     while not st.paused: # yields for pause, so don't assume function return means battle is over
         reload_mod()
+        logt( f'stats {stats}' )
         # Regular combat
         if detect_battle_combat():
-            logt( 'Battle awaiting player commands. Trying winrate' )
+            stats[ 'turns' ] += 1
+            logd( f"Turn {stats[ 'turns' ]} -> WinRate" )
             press( 'p' )
             press( 'ENTER' )
             if click( 'battle/WinRate', can_fail=True ):
                 press( 'ENTER' )
             error_count = 0
         elif has( 'battle/battlePause' ):
-            logt( 'Battle animation in progress' )
+            logt( 'animating turn...' )
             error_count = 0
         elif detect_loading():
-            logt( 'Loading...' )
+            logt( 'loading...' )
             error_count = 0
         # Battle interuptions (like events)
         elif has( 'event/Skip' ):
+            stats[ 'events' ] += 1
             event_resolve()
             error_count = 0
         # Unclear
@@ -532,28 +552,31 @@ def battle_combat( battle_state_unknown_timeout=5 ):
             error_count = 0
         # End of battle
         elif has( 'battle/levelUpConfirm' ):
-            logt( 'End of battle level up' )
+            logt( 'End level up' )
             click( 'battle/levelUpConfirm' )
         elif has( 'battle/blackWordConfirm' ) or has( 'battle/confirm' ):
-            logt( 'End of battle confirm' )
+            logt( 'End confirm' )
             click( 'battle/blackWordConfirm', can_fail=True ) or click( 'battle/confirm' )
             break
         elif has( 'mirror/mirror4/way/RewardCard/RewardCardSign' ):
-            logt( 'End of battle reward card' )
+            logt( 'End with reward card' )
             break
         elif has( 'mirror/mirror4/ego/egoGift' ):
-            logt( 'End of battle ego gift' )
+            logt( 'End with ego gift' )
             break
         elif has( 'mirror/mirror4/way/mirror4MapSign' ):
-            logt( 'Battle ended without fanfare' )
+            logt( 'End without fanfare' )
             break
         # Unknown state / error handling
         else:
-            logd( 'Battle state unknown' ) # usualy minor animation for new wave or animating reward screen
+            stats[ 'errors' ] += 1
+            logt( f"Battle state unknown #{stats[ 'errors' ]}" ) # usualy minor animation for new wave or animating reward screen
             if error_count > battle_state_unknown_timeout:
                 raise TimeoutError( 'Battle state unknown for too long' )
             error_count += 1
         sleep(1.0)
+    stats[ 'completed' ] = True
+    logi( f'end - stats{stats}' )
 
 def event_choice( choice: int ): # choice slot 0..2
     pos = has( 'event/Skip' )
@@ -678,7 +701,7 @@ def mirror_theme():
                     logd( f'Found theme {i}' )
                     return click_drag( template, Vec2(0,300) )
             except FileNotFoundError:
-                pass # probably disabled by user (prefixing name with _)
+                logt( f'Disabled or no file for theme {i}' )
             logt( f'..theme {i} not found' )
         if i == 0: click( 'mirror/mirror4/theme/refresh' )
 
@@ -690,8 +713,8 @@ def mirror_theme():
         raise TimeoutError( "Failed to find a valid theme, including randoming somehow" )
 
 def mirror_route_floor():
-    routes = { 'init.middle': Vec2(740, 340), 'init.high': Vec2(740,125), 'init.low': Vec2(740, 550),
-                   'midway.middle': Vec2(385, 340), 'midway.high': Vec2(385,100), 'midway.low': Vec2(385, 510) }
+    routes = {  'init.middle': Vec2(740, 340), 'init.high': Vec2(740,125), 'init.low': Vec2(740, 550),
+                'midway.middle': Vec2(385, 340), 'midway.high': Vec2(385,100), 'midway.low': Vec2(385, 510) }
 
     click( 'mirror/mirror4/way/Self' )
     if find( 'mirror/mirror4/way/Enter' ):
@@ -736,11 +759,13 @@ def mirror_starting_gifts():
     input_mouse_click( Vec2( 1060, 600 ), wait=0.3 )
     press( 'ENTER' )
 
-def job_mirror_dungeon():
-    logi( 'start' )
+def job_mirror():
+    logi( f'start' )
+    st.stats_mirror_started += 1
     error_zoom_count = 0
     while not st.paused:
         reload_mod()
+        logd( f'record {st.stats_mirror_successes}W-{st.stats_mirror_failures}L / {st.stats_mirror_started}' )
         if has( 'initMenu/drive' ):
             logd( 'Drive into mirror dungeon' )
             click( 'initMenu/drive' )
@@ -762,11 +787,13 @@ def job_mirror_dungeon():
             logd( 'Choose starting gifts' )
             mirror_starting_gifts() if st.ai_starting_gifts else control_wait_for_human()
         elif detect_loading():
-            logt( 'Loading...' )
+            logt( 'loading...' )
         elif has( 'mirror/mirror4/ClaimRewards' ):
             logi( 'Claiming final run rewards' )
             logc( 'HUMAN please gather images for win vs loss detection' )
-            control_wait_for_human()
+            #control_wait_for_human()
+            st.stats_mirror_failures += 1
+            st.stats_mirror_successes += 1
             press( 'ENTER' ) # first claim rewards button
             press( 'ENTER' ) # box to spend modules #FIXME probably check this for Win v Loss and option to decline
             press( 'ENTER' ) # popup to spend weekly
@@ -777,30 +804,30 @@ def job_mirror_dungeon():
             logd( 'Mirror floor routing' )
             mirror_route_floor() if st.ai_routing else control_wait_for_human()
         elif has( 'mirror/mirror4/way/ThemePack/SelectFloor' ) and has( 'mirror/mirror4/way/ThemePack/ThemePack' ):
-            logd( 'Selecting floor' )
+            logd( 'Select floor' )
             mirror_theme() if st.ai_themes else control_wait_for_human()
         elif has( 'event/Skip' ):
-            logd( 'Event in progress' )
+            logd( 'Event' )
             event_resolve()
         elif detect_battle_combat():
-            logd( 'Battle in progress' )
+            logd( 'Battle combat' )
             battle_combat()
         elif has( 'team/Announcer', threshold=0.7 ) \
         and has( 'mirror/mirror4/firstTeamConfirm', threshold=0.6 ) \
         and not has( 'team/ClearSelection' ): # firstTeamConfirm was 0.5, 0.6 has false positives
-            logd( 'Confirming initial team' )
+            logd( 'Prepare initial team' )
             press( 'ENTER' ) if st.ai_team_select else control_wait_for_human()
         elif detect_battle_prepare():
-            logd( 'Battle preparation' )
+            logd( 'Battle prepare' )
             battle_prepare_team() if st.ai_team_select else control_wait_for_human()
         elif has( 'mirror/mirror4/way/RewardCard/RewardCardSign' ):
             logd( 'Choose reward card' )
             mirror_choose_encounter_reward() if st.ai_reward_cards else control_wait_for_human()
         elif has( 'mirror/mirror4/ego/egoGift' ):
-            logd( 'Choosing ego gift of multiple choices' )
+            logd( 'Choose ego gift of multiple choices' )
             mirror_choose_ego_gift() if st.ai_reward_egos else control_wait_for_human()
         elif has( 'mirror/mirror4/way/Confirm' ):
-            logd( 'Confirming what I think is an ego gift' )
+            logd( 'Confirm what I think is an ego gift' )
             press( 'ENTER' )
         elif has( 'mirror/mirror4/way/Enter' ):
             logd( 'Assume in middle of accepting route node' )
@@ -863,7 +890,7 @@ def grind():
         elif step == 4: job_claim_battlepass()
         elif step == 5 and st.daily_exp_incomplete is True: job_daily_exp()
         elif step == 6 and st.daily_thread_incomplete is True: job_daily_thread()
-        elif step == 7: job_mirror_dungeon()
+        elif step == 7: job_mirror()
         elif step == 8: st.stats_grind_runs_completed += 1; break
         step += 1
         sleep(1.0)
@@ -900,9 +927,9 @@ def control_wait_for_human():
 ################################################################################
 
 def thread_main():
-    keyboard.add_hotkey( 'pause', control_toggle_pause )
-    keyboard.add_hotkey( 'scroll lock', control_halt )
-    keyboard.add_hotkey( 'home', report_status )
+    keyboard.add_hotkey( 'home', control_toggle_pause )
+    keyboard.add_hotkey( 'end', control_halt )
+    keyboard.add_hotkey( 'page up', report_status )
 
     if MANUAL_OVERRIDE_ROUTING: ai_set_manual_routing()
 
@@ -910,14 +937,19 @@ def thread_main():
     while not st.halt:
         if not st.paused:
             reload_mod()
-            grind()
+            try:
+                grind()
+            except TimeoutError as e:
+                logc( f'Error: {e}' )
+                logc( 'Desparation restart in 5 seconds' )
+                sleep( 5.0 )
         sleep(0.1)
     logc( 'halting' )
 
 def thread_video_log():
     if st.log_video is False: return
     fps = 30.0
-    log_path = f'logs/video_{st.log_app_start_time}'
+    log_path = f'{st.log_directory}/video_{st.log_app_start_time}'
     fourcc = cv2.VideoWriter_fourcc( *"XVID" ) # mp4v .mp4 is much larger
     video = cv2.VideoWriter( f'{log_path}.avi', fourcc, fps, (win.size.x, win.size.y), isColor=True )
     logi( 'Starting video log' )
