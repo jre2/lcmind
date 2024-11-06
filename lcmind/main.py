@@ -34,6 +34,7 @@ subjob_event_resolve: Event bespoke choices seem fragile? has been working so fa
 ################################################################################
 
 MANUAL_OVERRIDE_ROUTING = False
+DISABLE_DPI_REQUIREMENT = False
 
 @dataclass
 class State:
@@ -152,7 +153,7 @@ def log( msg='', level=None ):
         if subjob is None and frame.function.startswith( 'subjob_' ): subjob = frame.function[7:]
     
     # Generate tag from meta info, then final text
-    tag = '.'.join( x for x in [level,job,subjob,caller] if x )
+    tag = '.'.join( x for x in [level,job,caller] if x )
     tag = f'[{tag}]'
     text = f'{tag} {msg}'
 
@@ -191,7 +192,10 @@ def win_init():
     win.dc = windll.user32.GetDC( win.hwnd )
     assert win.dc, 'Failed to get window device context'
     win_fix()
-    if win_verify(): raise Exception( 'Window DPI scaling or size is incorrect' )
+    err = win_verify()
+    if err:
+        logc( err )
+        raise Exception( err )
 
 def win_cleanup():
     if win.hwnd and win.dc:
@@ -210,11 +214,13 @@ def win_fix():
     
 def win_verify() -> str | None:
     '''Verify window DPI scaling'''
-    # Check DPI scaling
+    logd( 'Verifying window DPI scaling' )
     dpi_x = windll.gdi32.GetDeviceCaps( win.dc, win32con.LOGPIXELSX ) # enums HORZRES DESKTOPHORZRES LOGPIXELSX
     dpi_y = windll.gdi32.GetDeviceCaps( win.dc, win32con.LOGPIXELSY )
-    if win.dpi != Vec2(dpi_x,dpi_y): return f"Window DPI is {dpi_x},{dpi_y} instead of {win.dpi}"
-    # Check window position and size
+    if not DISABLE_DPI_REQUIREMENT:
+        if win.dpi != Vec2(dpi_x,dpi_y): return f"Window DPI is {dpi_x},{dpi_y} instead of {win.dpi}"
+
+    logd( 'Verifying window position and size' )
     x,y, width,height = win32gui.GetWindowRect( win.hwnd )
     if win.pos != Vec2(x,y): return f"Window position is {x},{y} instead of {win.pos}"
     if win.size != Vec2(width,height): return f"Window size is {width},{height} instead of {win.size}"
@@ -444,7 +450,7 @@ def job_daily_exp():
     logd( 'waiting for team select' )
     find( 'team/Announcer', threshold=0.7, timeout=3.0, can_fail=False )
     battle_prepare_team()
-    subjob_battle_combat()
+    battle_combat()
     if not st.paused:
         click( 'goBack/leftarrow' ) # reset to home but also verify completion
 
@@ -462,7 +468,7 @@ def job_daily_thread():
     logd( 'waiting for team select' )
     find( 'team/Announcer', threshold=0.7, timeout=3.0, can_fail=False )
     battle_prepare_team()
-    subjob_battle_combat()
+    battle_combat()
     if not st.paused:
         click( 'goBack/leftarrow' ) # reset to home but also verify completion
 
@@ -471,7 +477,7 @@ def battle_prepare_team():
     # Choose team order
     sinner_priority_list = st.ai_team_mirror_sinner_priority if st.battle_team_type_mirror else st.ai_team_lux_sinner_priority
     full_template = 'team/FullTeam66' if st.battle_team_type_mirror else 'team/FullTeam55'
-    if not find( full_template, threshold=0.95 ):
+    if not find( full_template, threshold=0.90 ): # was 0.95 but having inconsistency
         logd( 'Team not prepared, redoing selection' )
         click( 'team/ClearSelection', wait=0.8 )
         press( 'ENTER' )
@@ -494,7 +500,7 @@ def battle_prepare_team():
     
     logi( 'Battle is loaded' )
 
-def subjob_battle_combat( battle_state_unknown_timeout=5 ):
+def battle_combat( battle_state_unknown_timeout=5 ):
     logi( 'start' )
     error_count = 0
     while not st.paused: # yields for pause, so don't assume function return means battle is over
@@ -515,7 +521,7 @@ def subjob_battle_combat( battle_state_unknown_timeout=5 ):
             error_count = 0
         # Battle interuptions (like events)
         elif has( 'event/Skip' ):
-            subjob_event_resolve()
+            event_resolve()
             error_count = 0
         # Unclear
         elif not has( 'mirror/mirror4/way/mirror4MapSign' ) and has( 'battle/trianglePause' ):
@@ -554,7 +560,7 @@ def event_choice( choice: int ): # choice slot 0..2
     if pos:
         input_mouse_click( Vec2(pos.x+150, pos.y -100 +choice*100), wait=1.5 )
 
-def subjob_event_resolve( max_skip_attempts=10 ):
+def event_resolve( max_skip_attempts=10 ):
     logi( 'start' )
     if not st.ai_events:
         logc( 'HUMAN Handle event' )
@@ -667,9 +673,12 @@ def mirror_theme():
         for i in range(1,41+1):
             if st.paused: return
             template= f'mirror/mirror4/theme/{i}'
-            if find( template, timeout=0.1 ):
-                logd( f'Found theme {i}' )
-                return click_drag( template, Vec2(0,300) )
+            try:
+                if find( template, timeout=0.1 ):
+                    logd( f'Found theme {i}' )
+                    return click_drag( template, Vec2(0,300) )
+            except FileNotFoundError:
+                pass # probably disabled by user (prefixing name with _)
             logt( f'..theme {i} not found' )
         if i == 0: click( 'mirror/mirror4/theme/refresh' )
 
@@ -772,10 +781,10 @@ def job_mirror_dungeon():
             mirror_theme() if st.ai_themes else control_wait_for_human()
         elif has( 'event/Skip' ):
             logd( 'Event in progress' )
-            subjob_event_resolve()
+            event_resolve()
         elif detect_battle_combat():
             logd( 'Battle in progress' )
-            subjob_battle_combat()
+            battle_combat()
         elif has( 'team/Announcer', threshold=0.7 ) \
         and has( 'mirror/mirror4/firstTeamConfirm', threshold=0.6 ) \
         and not has( 'team/ClearSelection' ): # firstTeamConfirm was 0.5, 0.6 has false positives
@@ -826,7 +835,7 @@ def job_resolve_until_home(): # True succeeded, False failed, None yieled for pa
         elif click( 'initMenu/CloseMail', can_fail=True, timeout=0.1 ): pass
         elif click( 'initMenu/cancel', can_fail=True, timeout=0.1 ): pass
         elif detect_battle_prepare(): battle_prepare_team()
-        elif detect_battle_combat(): subjob_battle_combat()
+        elif detect_battle_combat(): battle_combat()
         elif detect_loading(): pass
         else: return False
         sleep(1.0)
