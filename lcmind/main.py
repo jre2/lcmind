@@ -45,6 +45,7 @@ class State:
     stop_for_inspecting_unknowns: bool = False
 
     log_video: bool = True
+    log_levels_disabled: list[str] = ('TRACE',)
 
     # State
     daily_exp_incomplete: bool | None = None # None means unknown state
@@ -54,6 +55,7 @@ class State:
     job: str | None = None
     subjob: str | None = None
     log_app_start_time: str = None
+    module_mtime: float = 0
 
     # Control
     paused: bool = False
@@ -86,45 +88,111 @@ class Vec2:
     y: int = 0
 
 def reload_mod( module=None ):
-    if 0: # alternative, but has issues with global state
+    if 0: # less control
         import importlib
         import sys
         importlib.reload( sys.modules[ main.__module__ ] )
         return
-    import ast
+    if 0: # most control
+        import ast
+        import copy
+        from   dataclasses import is_dataclass
+        import sys
+        module = module if module is not None else sys.modules[ reload_mod.__module__ ]
+
+        try:
+            # Fetch updated source code
+            with open( module.__file__, 'r' ) as f:
+                module_source = f.read()
+            
+            # Compile
+            module_ast = ast.parse( module_source )
+            mod_code = compile( module_ast, module.__file__, 'exec' )
+            mod_globals = copy.copy( module.__dict__ )
+            print( id(module.st), module.win.hwnd )
+            print( id(module.__dict__['st']), module.__dict__['win'].hwnd )
+            print( id(mod_globals['st']), mod_globals['win'].hwnd )
+            exec( mod_code, mod_globals )
+            print( id(module.st), module.win.hwnd )
+            print( id(module.__dict__['st']), module.__dict__['win'].hwnd )
+            print( id(mod_globals['st']), mod_globals['win'].hwnd )
+        except SyntaxError as e:
+            loge( f'SyntaxError: {e}' )
+            return
+
+        # Update the module except dataclasses, which require a full restart
+        # Must modify sys.modules object direct; globals() doesn't work
+        for name, obj in mod_globals.items():
+            if not is_dataclass( obj ):
+                module.__dict__[ name ] = obj
+
+    global st, win
     import copy
-    from   dataclasses import is_dataclass
+    import importlib
+    import os
     import sys
-    module = module if module is not None else sys.modules[ reload_mod.__module__ ]
 
-    try:
-        # Fetch updated source code
-        with open( module.__file__, 'r' ) as f:
-            module_source = f.read()
-        
-        # Compile
-        module_ast = ast.parse( module_source )
-        mod_code = compile( module_ast, module.__file__, 'exec' )
-        mod_globals = copy.copy( module.__dict__ )
-        exec( mod_code, mod_globals )
-    except SyntaxError as e:
-        loge( f'SyntaxError: {e}' )
-        return
-
-    # Update the module except dataclasses, which require a full restart
-    # Must modify sys.modules object direct; globals() doesn't work
-    for name, obj in mod_globals.items():
-        if not is_dataclass( obj ):
-            module.__dict__[ name ] = obj
+    mod_mtime = os.path.getmtime( sys.modules[ main.__module__ ].__file__ )
+    if mod_mtime > st.module_mtime:
+        st.module_mtime = mod_mtime
     
-    logw( 'Reloaded module' )
+        try:
+            bak_win = copy.copy( win ) # maybe deepcopy for sinner lists?
+            bak_st = copy.copy( st )
+            importlib.reload( sys.modules[ main.__module__ ] )
+            win = bak_win
+            st = bak_st
+        except SyntaxError as e:
+            return loge( f'SyntaxError: {e}' )
+        logw( 'Reloaded module' )
+
+def reload_func( func ):
+    import ast, copy, sys
+
+    # Source code
+    module_name = func.__module__
+    module = sys.modules[module_name]
+    module_path = module.__file__
+    module_source = ''
+    with open( module_path, 'r' ) as f:
+        module_source = f.read()
+    
+    # Locate function
+    module_ast = ast.parse( module_source )
+    func_ast = None
+    for node in ast.walk( module_ast ):
+        if isinstance( node, ast.FunctionDef ) and node.name == func.__name__:
+            func_ast = node
+            break
+    else: raise NameError( f'Failed to locate function {func.__name__} in new module source code' )
+
+    # Compile function
+        # hack since an empty module doesn't compile
+    #dummy_module_ast = ast.Module( body=[func_ast] )
+    dummy_module_ast = copy.copy( module_ast )
+    dummy_module_ast.body = [ func_ast ]
+
+    mod_code = compile( dummy_module_ast, module_path, 'exec' )
+    
+    # Execute the module, then extract the function
+    #mod_globals = globals().copy()
+    mod_globals = copy.copy( module.__dict__ )
+    exec( mod_code, mod_globals )
+    new_func = mod_globals[ func.__name__ ]
+    module.__dict__[ func.__name__ ] = new_func
 
 ################################################################################
 ## Logging
 ################################################################################
 
-def log_time(): return time.strftime("%Y-%m-%d_%H-%M-%S", time.gmtime()) # not quite iso 8601
+def logc( msg ): log( level='CRITICAL', msg=msg )
+def loge( msg ): log( level='ERROR', msg=msg )
+def logw( msg ): log( level='WARNING', msg=msg )
+def logi( msg ): log( level='INFO', msg=msg )
+def logd( msg ): log( level='DEBUG', msg=msg )
+def logt( msg ): log( level='TRACE', msg=msg )
 
+def log_time(): return time.strftime("%Y-%m-%d_%H-%M-%S", time.gmtime()) # not quite iso 8601
 def log_colorize_text( text:str, fg:str|None=None, bg:str|None=None, mode:str|None=None ) -> str:
     '''Colorize text for terminal printing. Bright not supported since compatibility is low'''
     # https://gist.github.com/fnky/458719343aabd01cfb17a3a4f7296797
@@ -146,14 +214,15 @@ def log_colorize_text( text:str, fg:str|None=None, bg:str|None=None, mode:str|No
 
 def log( msg='', level=None ):
     # Derive meta information by crawling the stack
-    thread, job, subjob = None, None, None
+    thread, job, subjob, caller = None, None, None, None
     for frame in inspect.stack():
+        if caller is None and not frame.function.startswith( 'log' ): caller = frame.function
         if thread is None and frame.function.startswith( 'thread_' ): thread = frame.function[7:]
         if job is None and frame.function.startswith( 'job_' ): job = frame.function[4:]
         if subjob is None and frame.function.startswith( 'subjob_' ): subjob = frame.function[7:]
     
     # Generate tag from meta info, then final text
-    tag = '.'.join( x for x in [level,thread,job,subjob] if x )
+    tag = '.'.join( x for x in [level,job,subjob,caller] if x )
     tag = f'[{tag}]'
     text = f'{tag} {msg}'
 
@@ -162,24 +231,17 @@ def log( msg='', level=None ):
     if   level == 'CRITICAL': text_colored = log_colorize_text( text, 'Red' )
     elif level == 'ERROR':    text_colored = log_colorize_text( text, 'Red' )
     elif level == 'WARNING':  text_colored = log_colorize_text( text, 'Magenta' )
-    elif level == 'INFO':     text_colored = log_colorize_text( text, 'Yellow' ) # Yellow Cyan Green
+    elif level == 'INFO':     text_colored = log_colorize_text( text, 'Yellow' ) # Green
     elif level == 'DEBUG':    text_colored = log_colorize_text( text, 'Cyan' ) # Blue
     elif level == 'TRACE':    text_colored = log_colorize_text( text, 'White' )
 
     # Print to terminal and write to log file
-    print( text_colored )
+    if level not in st.log_levels_disabled: print( text_colored )
     with open( f'logs/console_{st.log_app_start_time}.txt', 'a' ) as f:
         f.write( text +'\n' )
 
-def logc( msg ): log( level='CRITICAL', msg=msg )
-def loge( msg ): log( level='ERROR', msg=msg )
-def logw( msg ): log( level='WARNING', msg=msg )
-def logi( msg ): log( level='INFO', msg=msg )
-def logd( msg ): log( level='DEBUG', msg=msg )
-def logt( msg ): log( level='TRACE', msg=msg )
-
 ################################################################################
-## Platform specific bot foundation library
+## Platform specific functionality for constructing basic image bot verbs
 ################################################################################
 
 @dataclass
@@ -306,7 +368,7 @@ def sleep( seconds ):
     time.sleep( seconds )
 
 ################################################################################
-## General image bot library. Main verbs for jobs
+## General image bot verbs for constructing jobs
 ################################################################################
 
 def img_find( template_name: str, threshold=0.8, use_best=True, use_grey_normalization=False, color_space=cv2.COLOR_RGB2GRAY ) -> Vec2 | None:
@@ -341,7 +403,7 @@ def img_find( template_name: str, threshold=0.8, use_best=True, use_grey_normali
     # Find center of template at best match location
     h,w = template_img.shape
     center = Vec2( loc[0]+w//2, loc[1]+h//2 )
-    print( f"    found {template_name} at {center}" )
+    logt( f"found {template_name} at {center}" )
     return center
 
 def find( template_name: str, threshold=0.8, use_best=True, timeout=1.0, can_fail=True ):
@@ -365,7 +427,7 @@ def click( template_name: str, wait=0.6, can_fail=False, threshold=0.75, use_bes
 def nclick( template_name: str, wait=0.6, can_fail=False, threshold=0.75, use_best=True, timeout=1.0 ):
     '''Dry run version of click'''
     pos = find( template_name, threshold, use_best, timeout, can_fail )
-    if pos: print( f"Would click {template_name} at {pos}" )
+    if pos: logc( f"would click {template_name} at {pos}" )
     return pos
 
 def click_drag( template_name: str, dest_offset: Vec2, wait=0.9, can_fail=False, threshold=0.75, use_best=True, timeout=1.0 ):
@@ -377,34 +439,7 @@ def press( key, wait=0.5 ):
     input_keyboard_press( key, wait )
 
 ################################################################################
-## Bot universal
-################################################################################
-
-def report_status():
-    print( st )
-    print( 'Mouse', input_mouse_get_pos() )
-
-def toggle_pause():
-    st.paused = not st.paused
-    if st.paused: print( 'Paused' )
-    else:
-        print( 'Unpaused' )
-        win_fix()
-
-def halt():
-    print( 'Halting...' )
-    st.halt = True
-    st.paused = True # halt implies paused so we can simply check paused in loops
-
-def wait_for_human():
-    '''Waits for human to take care of something and press un-pause button (via hotkey thread)'''
-    print( '>>> Waiting for human intervention <<<' )
-    st.paused = True
-    while st.paused:
-        sleep(0.1)
-
-################################################################################
-## Limbus Specific
+## Limbus Specific - Bot Jobs
 ################################################################################
 
 def detect_battle_prepare() -> bool:
@@ -414,37 +449,38 @@ def detect_loading() -> bool:
 def detect_battle_combat() -> bool:
     return has( 'battle/WinRate' ) or has( 'battle/Start' )
 
-def stamina_convert_to_modules():
-    print( '[Main] Job - stamina_convert_to_modules' )
+def job_stamina_convert_to_modules():
+    logi( 'start' )
     click( 'initMenu/greenPai' )
     click( 'initMenu/maxModule' )
     click( 'initMenu/confirm' )
     click( 'initMenu/cancel', can_fail=True )
 
-def stamina_buy_with_lunacy():
-    print( '[Main] Job - stamina_buy_with_lunacy' )
+def job_stamina_buy_with_lunacy():
+    logi( 'start' )
     click( 'initMenu/greenPai' )
     click( 'initMenu/UseLunary' )
     # old safe strat was just 1/d by looking for first buy image
     # now we do less safe N/day strat by looking for N+1 reset imagery
     #if find( 'initMenu/FirstBuy', threshold=0.9 ):
-    if not find( f'initMenu/StaminaReset{st.stamina_daily_resets}' ):
+    if not find( f'initMenu/StaminaReset{st.stamina_daily_resets}', threshold=0.9 ): # slightly inaccurate. 7 seen as 9 but close enough for now
         click( 'initMenu/confirm' )
         st.stats_stamina_resets += 1
+        logd( f'bought {st.stats_stamina_resets} resets since startup' )
     else:
-        print( f'Already bought {st.stamina_daily_resets} resets today' )
+        logd( f'already bought {st.stamina_daily_resets} resets today' )
     click( 'initMenu/cancel', can_fail=True )
 
-def claim_mail():
-    print( '[Main] Job - claim_mail' )
+def job_claim_mail():
+    logi( 'start' )
     click( 'initMenu/window' )
     click( 'initMenu/Mail' )
     click( 'initMenu/ClaimAll' )
     click( 'initMenu/MailConfirm', can_fail=True )
     click( 'initMenu/CloseMail' )
 
-def claim_battlepass():
-    print( '[Main] Job - claim_battlepass' )
+def job_claim_battlepass():
+    logi( 'start' )
     click( 'initMenu/window' )
     click( 'prize/Season5BattlePass', wait=0.5 ) # revisit now that wait is fixed
     for _ in range(5):
@@ -458,6 +494,7 @@ def claim_battlepass():
     
     st.daily_exp_incomplete = find( 'prize/IncompleteDailyExp' ) is not None
     st.daily_thread_incomplete = find( 'prize/IncompleteDailyThread' ) is not None
+    logd( f'Daily completion status: exp={st.daily_exp_incomplete} thread={st.daily_thread_incomplete}' )
     click( 'prize/Weekly' )
     pos = Vec2(520,240)
     for i in range(5):
@@ -465,8 +502,9 @@ def claim_battlepass():
         pos.y += 90
     click( 'goBack/leftarrow' )
 
-def daily_exp():
-    print( '[Main] Job - daily_exp' )
+def job_daily_exp():
+    logi( 'start' )
+    logd( 'navigating ui' )
     click( 'initMenu/drive' )
     for _ in range(5):
         click( 'luxcavation/luxcavationEntrance' )
@@ -474,13 +512,16 @@ def daily_exp():
     else: raise TimeoutError( 'Failed to find luxcavation entrance' )
     click( 'luxcavation/ExpEntrance' )
     click( 'luxcavation/EXPDifficultyLv18' )
+    logd( 'waiting for team select' )
     find( 'team/Announcer', threshold=0.7, timeout=3.0, can_fail=False )
-    battle_prepare_team()
-    battle_combat()
-    click( 'goBack/leftarrow' )
+    subjob_battle_prepare_team()
+    subjob_battle_combat()
+    if not st.paused:
+        click( 'goBack/leftarrow' ) # reset to home but also verify completion
 
-def daily_thread():
-    print( '[Main] Job - daily_thread' )
+def job_daily_thread():
+    logi( 'start' )
+    logd( 'navigating ui' )
     click( 'initMenu/drive' )
     for _ in range(5):
         click( 'luxcavation/luxcavationEntrance' )
@@ -489,17 +530,20 @@ def daily_thread():
     click( 'luxcavation/ThreadEntrance' )
     click( 'luxcavation/Enter' )
     click( 'luxcavation/ThreadDifficultyLv20' )
+    logd( 'waiting for team select' )
     find( 'team/Announcer', threshold=0.7, timeout=3.0, can_fail=False )
-    battle_prepare_team()
-    battle_combat()
-    click( 'goBack/leftarrow' )
+    subjob_battle_prepare_team()
+    subjob_battle_combat()
+    if not st.paused:
+        click( 'goBack/leftarrow' ) # reset to home but also verify completion
 
-def battle_prepare_team( battle_load_timeout=None ):
-    print( '[Main] SubJob - battle_prepare_team' )
+def subjob_battle_prepare_team( battle_load_timeout=None ):
+    logi( 'start' )
     # Choose team order
     sinner_priority_list = st.ai_team_mirror_sinner_priority if st.battle_team_type_mirror else st.ai_team_lux_sinner_priority
     full_template = 'team/FullTeam66' if st.battle_team_type_mirror else 'team/FullTeam55'
     if not find( full_template, threshold=0.95 ):
+        logd( 'Team not prepared, redoing selection' )
         click( 'team/ClearSelection', wait=0.8 )
         press( 'ENTER' )
         pos = find( 'team/Announcer', threshold=0.7, can_fail=False )
@@ -507,40 +551,42 @@ def battle_prepare_team( battle_load_timeout=None ):
             rel_pos = Vec2( (idx % 6 +1)* 140, (idx//6)*200 + 100 )
             input_mouse_click( Vec2(pos.x+rel_pos.x, pos.y+rel_pos.y) )
     else:
-        print( 'Team is already prepared' )
+        logd( 'Team is already prepared' )
 
     # Now start battle
     press( 'ENTER' )
 
     # Wait for battle to load
+    logd( 'waiting for battle to load' )
     time_last_seen_loading = time.time()
     while not detect_battle_combat() and not st.paused:
         if detect_loading():
             time_last_seen_loading = time.time()
-            print( 'Battle is loading...' )
+            logd( 'Battle is loading...' )
         if battle_load_timeout is not None and (time.time()-time_last_seen_loading > battle_load_timeout):
             raise TimeoutError( 'Failed to load battle' )
         sleep(1.0)
     
-    print( 'Battle is loaded' )
+    logi( 'Battle is loaded' )
 
-def battle_combat( battle_state_unknown_timeout=5 ):
-    print( '[Main] SubJob - battle_combat' )
+def subjob_battle_combat( battle_state_unknown_timeout=5 ):
+    logi( 'start' )
     error_count = 0
-    while not st.paused:
+    while not st.paused: # yields for pause, so don't assume function return means battle is over
+        reload_mod()
         # Regular combat
         if detect_battle_combat():
-            print( 'Battle awaiting player commands. Trying winrate' )
+            logt( 'Battle awaiting player commands. Trying winrate' )
             press( 'p' )
             press( 'ENTER' )
             if click( 'battle/WinRate', can_fail=True ):
                 press( 'ENTER' )
             error_count = 0
         elif has( 'battle/battlePause' ):
-            print( 'Battle animation in progress' )
+            logt( 'Battle animation in progress' )
             error_count = 0
         elif detect_loading():
-            print( 'Loading...' )
+            logt( 'Loading...' )
             error_count = 0
         # Battle interuptions (like events)
         elif has( 'event/Skip' ):
@@ -548,31 +594,31 @@ def battle_combat( battle_state_unknown_timeout=5 ):
             error_count = 0
         # Unclear
         elif not has( 'mirror/mirror4/way/mirror4MapSign' ) and has( 'battle/trianglePause' ):
-            print( 'JMR unclear state but other bot checks for this and hits the play button' )
+            logc( 'JMR unclear state but other bot checks for this and hits the play button' )
             click( 'battle/trianglePause' )
             if st.stop_for_inspecting_unknowns:
-                wait_for_human() #FIXME: figure out what this is for
+                control_wait_for_human() #FIXME: figure out what this is for. current guess is manager level up screen?
             error_count = 0
         # End of battle
         elif has( 'battle/levelUpConfirm' ):
-            print( 'End of battle level up' )
+            logt( 'End of battle level up' )
             click( 'battle/levelUpConfirm' )
         elif has( 'battle/blackWordConfirm' ) or has( 'battle/confirm' ):
-            print( 'End of battle confirm' )
+            logt( 'End of battle confirm' )
             click( 'battle/blackWordConfirm', can_fail=True ) or click( 'battle/confirm' )
             break
         elif has( 'mirror/mirror4/way/RewardCard/RewardCardSign' ):
-            print( 'End of battle reward card' )
+            logt( 'End of battle reward card' )
             break
         elif has( 'mirror/mirror4/ego/egoGift' ):
-            print( 'End of battle ego gift' )
+            logt( 'End of battle ego gift' )
             break
         elif has( 'mirror/mirror4/way/mirror4MapSign' ):
-            print( 'Battle ended without fanfare' )
+            logt( 'Battle ended without fanfare' )
             break
         # Unknown state / error handling
         else:
-            print( 'Battle state unknown' ) # usualy minor animation for new wave or animating reward screen
+            logd( 'Battle state unknown' ) # usualy minor animation for new wave or animating reward screen
             if error_count > battle_state_unknown_timeout:
                 raise TimeoutError( 'Battle state unknown for too long' )
             error_count += 1
@@ -623,16 +669,16 @@ def event_resolve( max_skip_attempts=10 ):
     print( '[Main] SubJob - event_resolve' )
     if not st.ai_events:
         print( 'HUMAN Handle event' )
-        return wait_for_human()
+        return control_wait_for_human()
     skip_attempts = 0
     while not st.paused:
         if has( 'mirror/mirror4/ProductCatalogue/ProductCatalogue' ):
             if has( 'mirror/mirror4/ProductCatalogue/FuseGifts' ):
                 print( 'Event is a shop (chair)' )
-                mirror_shop_chair() if st.ai_shop_chair else wait_for_human()
+                mirror_shop_chair() if st.ai_shop_chair else control_wait_for_human()
             elif has( 'mirror/mirror4/ProductCatalogue/PurchaseEGO' ):
                 print( 'Event is a shop (buy)' )
-                mirror_shop_buy() if st.ai_shop_buy else wait_for_human()
+                mirror_shop_buy() if st.ai_shop_buy else control_wait_for_human()
             break
         elif has( 'event/ChooseCheck' ):
             print( 'Event choose sinner to perform check' )
@@ -753,8 +799,8 @@ def mirror_starting_gifts():
     input_mouse_click( Vec2( 1060, 600 ), wait=0.3 )
     press( 'ENTER' )
 
-def mirror_dungeon():
-    print( '[Main] Job - mirror_dungeon' )
+def job_mirror_dungeon():
+    logi( 'start' )
     error_zoom_count = 0
     while not st.paused:
         if has( 'initMenu/drive' ):
@@ -763,26 +809,26 @@ def mirror_dungeon():
             click( 'mirror/mirror4/MirrorDungeons' )
             if find( 'mirror/previousClaimReward' ):
                 print( 'HUMAN There is a reward from a pre-existing session. Please handle manually' )
-                wait_for_human()
+                control_wait_for_human()
         elif has( 'mirror/mirror4/mirror4Normal' ):
             print( 'Enter MD normal' )
             click( 'mirror/mirror4/mirror4Normal' )
             if find( 'mirror/MirrorInProgress' ):
                 print( 'HUMAN Mirror is in progress. Please handle manually' )
-                wait_for_human()
+                control_wait_for_human()
             if click( 'mirror/mirror4/Enter', can_fail=True, wait=2 ) or click( 'mirror/mirror4/Resume', can_fail=True, wait=5 ):
                 print( 'Starting or resuming mirror' )
             else:
                 raise TimeoutError( 'Failed to start or resume mirror' )
         elif has( 'mirror/mirror4/gift/Poise/Poise' ):
             print( 'Choose starting gifts' )
-            mirror_starting_gifts() if st.ai_starting_gifts else wait_for_human()
+            mirror_starting_gifts() if st.ai_starting_gifts else control_wait_for_human()
         elif detect_loading():
             print( 'Loading...' )
         elif has( 'mirror/mirror4/ClaimRewards' ):
             print( 'Claiming final run rewards' )
             print( 'HUMAN please gather images for win vs loss detection' )
-            wait_for_human()
+            control_wait_for_human()
             press( 'ENTER' ) # first claim rewards button
             press( 'ENTER' ) # box to spend modules #TODO probably check this for Win v Loss and option to decline
             press( 'ENTER' ) # popup to spend weekly
@@ -791,30 +837,30 @@ def mirror_dungeon():
             if find( 'initMenu/Window' ): break
         elif has( 'mirror/mirror4/way/mirror4MapSign' ) and has( 'mirror/mirror4/way/Self', threshold=0.8 ):
             print( 'Mirror floor routing' )
-            mirror_route_floor() if st.ai_routing else wait_for_human()
+            mirror_route_floor() if st.ai_routing else control_wait_for_human()
         elif has( 'mirror/mirror4/way/ThemePack/SelectFloor' ) and has( 'mirror/mirror4/way/ThemePack/ThemePack' ):
             print( 'Selecting floor' )
-            mirror_theme() if st.ai_themes else wait_for_human()
+            mirror_theme() if st.ai_themes else control_wait_for_human()
         elif has( 'event/Skip' ):
             print( 'Event in progress' )
             event_resolve()
         elif detect_battle_combat():
             print( 'Battle in progress' )
-            battle_combat()
+            subjob_battle_combat()
         elif has( 'team/Announcer', threshold=0.7 ) \
         and has( 'mirror/mirror4/firstTeamConfirm', threshold=0.6 ) \
         and not has( 'team/ClearSelection' ): # firstTeamConfirm was 0.5, 0.6 has false positives
             print( 'Confirming initial team' )
-            press( 'ENTER' ) if st.ai_team_select else wait_for_human()
+            press( 'ENTER' ) if st.ai_team_select else control_wait_for_human()
         elif detect_battle_prepare():
             print( 'Battle preparation' )
-            battle_prepare_team() if st.ai_team_select else wait_for_human()
+            subjob_battle_prepare_team() if st.ai_team_select else control_wait_for_human()
         elif has( 'mirror/mirror4/way/RewardCard/RewardCardSign' ):
             print( 'Choose reward card' )
-            mirror_choose_encounter_reward() if st.ai_reward_cards else wait_for_human()
+            mirror_choose_encounter_reward() if st.ai_reward_cards else control_wait_for_human()
         elif has( 'mirror/mirror4/ego/egoGift' ):
             print( 'Choosing ego gift of multiple choices' )
-            mirror_choose_ego_gift() if st.ai_reward_egos else wait_for_human()
+            mirror_choose_ego_gift() if st.ai_reward_egos else control_wait_for_human()
         elif has( 'mirror/mirror4/way/Confirm' ):
             print( 'Confirming what I think is an ego gift' )
             press( 'ENTER' )
@@ -843,84 +889,90 @@ def mirror_dungeon():
             print( 'Unknown state during mirror' )
         sleep(1.0)
 
-def resolve_until_home():
-    print( '[Main] SubJob - resolve_until_home' )
+def job_resolve_until_home(): # True succeeded, False failed, None yieled for pause
+    logi( 'start' )
     while not st.paused:
-        if click( 'initMenu/Window', can_fail=True, timeout=0.1 ): return True
+        if   click( 'initMenu/Window', can_fail=True, timeout=0.1 ): return True
         elif click( 'goBack/leftarrow', can_fail=True, timeout=0.1 ): pass
         elif click( 'initMenu/CloseMail', can_fail=True, timeout=0.1 ): pass
         elif click( 'initMenu/cancel', can_fail=True, timeout=0.1 ): pass
-        elif detect_battle_prepare(): battle_prepare_team()
-        elif detect_battle_combat(): battle_combat()
+        elif detect_battle_prepare(): subjob_battle_prepare_team()
+        elif detect_battle_combat(): subjob_battle_combat()
         elif detect_loading(): pass
         else: return False
         sleep(1.0)
 
 def grind():
-    if st.paused: return
-    logi( 'Grind run' )
+    logi( f'Grind run v2 {st.stats_grind_runs_completed}/{st.stats_grind_runs_attempted}' )
     st.stats_grind_runs_attempted += 1
+    step = 0
+    while not st.paused:
+        reload_mod()
+        if step == 0:
+            res = job_resolve_until_home()
+            if res is None:
+                logd( 'yielding for pause' )
+                return
+            elif res is True:
+                logd( 'returned to home screen' )
+                step = 0
+            else:
+                logw( 'Unable to resolve to home screen. Assuming mirror dungeon' )
+                step = 6
+        elif step == 1: job_stamina_buy_with_lunacy()
+        elif step == 2: job_stamina_convert_to_modules()
+        elif step == 3: job_claim_mail()
+        elif step == 4: job_claim_battlepass()
+        elif step == 5 and st.daily_exp_incomplete is True: job_daily_exp()
+        elif step == 6 and st.daily_thread_incomplete is True: job_daily_thread()
+        elif step == 7: job_mirror_dungeon()
+        elif step == 8: st.stats_grind_runs_completed += 1; break
+        step += 1
+        sleep(1.0)
 
-    raise NotImplementedError( 'Grind not implemented' )
-    if resolve_until_home() == False:
-        print( 'Unable to resolve to home screen. Assuming mirror dungeon' )
-        return mirror_dungeon()
+################################################################################
+## Bot universal / control
+################################################################################
 
-    stamina_convert_to_modules()
-    if st.paused: return
-    stamina_buy_with_lunacy()
-    if st.paused: return
-    claim_mail()
-    if st.paused: return
-    claim_battlepass()
-    if st.paused: return
-    if st.daily_exp_incomplete is True: daily_exp()
-    if st.paused: return
-    if st.daily_thread_incomplete is True: daily_thread()
-    if st.paused: return
-    mirror_dungeon()
+def report_status():
+    logi( st )
+    logi( f'Mouse: {input_mouse_get_pos()}' )
 
-    st.stats_grind_runs_completed += 1
+def control_toggle_pause():
+    st.paused = not st.paused
+    if st.paused: loge( 'Paused' )
+    else:
+        loge( 'Unpaused' )
+        win_fix()
+
+def control_halt():
+    logc( 'Halting...' )
+    st.halt = True
+    st.paused = True # halt implies paused so we can simply check paused in loops
+
+def control_wait_for_human():
+    '''Waits for human to take care of something and press un-pause button (via hotkey thread)'''
+    logc( '>>> Waiting for human intervention <<<' )
+    st.paused = True
+    while st.paused:
+        sleep(0.1)
 
 ################################################################################
 ## Driver
 ################################################################################
 
-def test_job_1():
-    print( '    test_job_1 444' )
-
-def helper1():
-    print( '    helper1' )
-
-def test_job_2():
-    print( '    test_job_2 333' )
-    print( '        foobar' )
-    helper1()
-
-def test():
-    print( 'test start' )
-    while not st.halt:
-        print( f'test loop {st.stats_dummy}' )
-        reload_mod()
-
-        print( 'test_job_1', test_job_1, test_job_1() )
-
-        #test_job_2()
-
-        sleep(1)
-        st.stats_dummy += 1
-
 def thread_main():
-    keyboard.add_hotkey( 'pause', toggle_pause )
-    keyboard.add_hotkey( 'scroll lock', halt )
+    keyboard.add_hotkey( 'pause', control_toggle_pause )
+    keyboard.add_hotkey( 'scroll lock', control_halt )
     keyboard.add_hotkey( 'home', report_status )
 
     if MANUAL_OVERRIDE_ROUTING: ai_set_manual_routing()
 
     logi( 'Starting grind loop' )
     while not st.halt:
-        #grind()
-        test()
+        if not st.paused:
+            reload_mod()
+            grind()
         sleep(0.1)
     logc( 'halting' )
 
@@ -953,7 +1005,7 @@ def main():
     thread_cap = threading.Thread( target=thread_video_log )
     
     try:
-        #win_init()
+        win_init()
         thread_cap.start()
         thread_main()
     finally:
