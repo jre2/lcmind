@@ -1,11 +1,15 @@
+import copy
 import ctypes
 from   ctypes import windll
 import ctypes.wintypes
 import cv2
 from   dataclasses import dataclass
+import importlib
 import inspect
 import keyboard
 import numpy
+import os
+import sys
 import threading
 import time
 import win32api
@@ -13,18 +17,23 @@ import win32con
 import win32gui
 
 #FUTURE: remove pyautogui (no multi-monitor and bloated), win32gui, win32api, and keyboard
+#FUTURE: detect failures and decline run, if configured to
+#FUTURE: run in a vm, rdp wrap, or something to avoid stealing focus/mouse/keyboard
 
 '''Known bugs
 claim_battlepass: missed last mission. clicked too fast?
 battle_prepare_team: incorrectly identifies 3/5 team as 5/5
 battle_prepare_team: stuck with 1 character since meursault wasn't in list. verify working after fix
+job_stamina_buy_with_lunacy: stops at 7 resets when should be 9
+
+subjob_event_resolve: Event bespoke choices seem fragile? has been working so far though
 '''
 
 ################################################################################
 ## Defy organization
 ################################################################################
 
-MANUAL_OVERRIDE_ROUTING = True
+MANUAL_OVERRIDE_ROUTING = False
 
 @dataclass
 class State:
@@ -88,98 +97,19 @@ class Vec2:
     y: int = 0
 
 def reload_mod( module=None ):
-    if 0: # less control
-        import importlib
-        import sys
-        importlib.reload( sys.modules[ main.__module__ ] )
-        return
-    if 0: # most control
-        import ast
-        import copy
-        from   dataclasses import is_dataclass
-        import sys
-        module = module if module is not None else sys.modules[ reload_mod.__module__ ]
-
-        try:
-            # Fetch updated source code
-            with open( module.__file__, 'r' ) as f:
-                module_source = f.read()
-            
-            # Compile
-            module_ast = ast.parse( module_source )
-            mod_code = compile( module_ast, module.__file__, 'exec' )
-            mod_globals = copy.copy( module.__dict__ )
-            print( id(module.st), module.win.hwnd )
-            print( id(module.__dict__['st']), module.__dict__['win'].hwnd )
-            print( id(mod_globals['st']), mod_globals['win'].hwnd )
-            exec( mod_code, mod_globals )
-            print( id(module.st), module.win.hwnd )
-            print( id(module.__dict__['st']), module.__dict__['win'].hwnd )
-            print( id(mod_globals['st']), mod_globals['win'].hwnd )
-        except SyntaxError as e:
-            loge( f'SyntaxError: {e}' )
-            return
-
-        # Update the module except dataclasses, which require a full restart
-        # Must modify sys.modules object direct; globals() doesn't work
-        for name, obj in mod_globals.items():
-            if not is_dataclass( obj ):
-                module.__dict__[ name ] = obj
-
     global st, win
-    import copy
-    import importlib
-    import os
-    import sys
 
     mod_mtime = os.path.getmtime( sys.modules[ main.__module__ ].__file__ )
     if mod_mtime > st.module_mtime:
         st.module_mtime = mod_mtime
     
         try:
-            bak_win = copy.copy( win ) # maybe deepcopy for sinner lists?
-            bak_st = copy.copy( st )
+            bak_win, bak_st = copy.copy( win ), copy.copy( st ) #TODO verify doesn't need deepcopy
             importlib.reload( sys.modules[ main.__module__ ] )
-            win = bak_win
-            st = bak_st
+            win, st = bak_win, bak_st
         except SyntaxError as e:
             return loge( f'SyntaxError: {e}' )
         logw( 'Reloaded module' )
-
-def reload_func( func ):
-    import ast, copy, sys
-
-    # Source code
-    module_name = func.__module__
-    module = sys.modules[module_name]
-    module_path = module.__file__
-    module_source = ''
-    with open( module_path, 'r' ) as f:
-        module_source = f.read()
-    
-    # Locate function
-    module_ast = ast.parse( module_source )
-    func_ast = None
-    for node in ast.walk( module_ast ):
-        if isinstance( node, ast.FunctionDef ) and node.name == func.__name__:
-            func_ast = node
-            break
-    else: raise NameError( f'Failed to locate function {func.__name__} in new module source code' )
-
-    # Compile function
-        # hack since an empty module doesn't compile
-    #dummy_module_ast = ast.Module( body=[func_ast] )
-    dummy_module_ast = copy.copy( module_ast )
-    dummy_module_ast.body = [ func_ast ]
-
-    mod_code = compile( dummy_module_ast, module_path, 'exec' )
-    
-    # Execute the module, then extract the function
-    #mod_globals = globals().copy()
-    mod_globals = copy.copy( module.__dict__ )
-    exec( mod_code, mod_globals )
-    new_func = mod_globals[ func.__name__ ]
-    module.__dict__[ func.__name__ ] = new_func
 
 ################################################################################
 ## Logging
@@ -332,7 +262,7 @@ def input_mouse_drag( from_pos: Vec2, to_pos: Vec2, wait=0.3, move_mouse_away=Tr
         # normalize for mouse_event
         pos.x = int( pos.x * 65535/win.screen_size.x )
         pos.y = int( pos.y * 65535/win.screen_size.y )
-        print( f'mouse dragging {pos}' )
+        logt( f'mouse dragging {pos}' )
         windll.user32.mouse_event( win32con.MOUSEEVENTF_ABSOLUTE | win32con.MOUSEEVENTF_MOVE, pos.x, pos.y, 0, 0 )
         sleep( 1 / steps )
     windll.user32.mouse_event( win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0 )
@@ -378,7 +308,6 @@ def img_find( template_name: str, threshold=0.8, use_best=True, use_grey_normali
     if template_img is None: raise FileNotFoundError( f'Failed to load template image {template_path}' )
 
     # Load screenshot image
-    #TODO smart caching for performance reasons
     screen_img = cv2.cvtColor( numpy.array(win_screenshot()), color_space )
 
     if use_grey_normalization:
@@ -514,7 +443,7 @@ def job_daily_exp():
     click( 'luxcavation/EXPDifficultyLv18' )
     logd( 'waiting for team select' )
     find( 'team/Announcer', threshold=0.7, timeout=3.0, can_fail=False )
-    subjob_battle_prepare_team()
+    battle_prepare_team()
     subjob_battle_combat()
     if not st.paused:
         click( 'goBack/leftarrow' ) # reset to home but also verify completion
@@ -532,12 +461,12 @@ def job_daily_thread():
     click( 'luxcavation/ThreadDifficultyLv20' )
     logd( 'waiting for team select' )
     find( 'team/Announcer', threshold=0.7, timeout=3.0, can_fail=False )
-    subjob_battle_prepare_team()
+    battle_prepare_team()
     subjob_battle_combat()
     if not st.paused:
         click( 'goBack/leftarrow' ) # reset to home but also verify completion
 
-def subjob_battle_prepare_team( battle_load_timeout=None ):
+def battle_prepare_team():
     logi( 'start' )
     # Choose team order
     sinner_priority_list = st.ai_team_mirror_sinner_priority if st.battle_team_type_mirror else st.ai_team_lux_sinner_priority
@@ -558,13 +487,9 @@ def subjob_battle_prepare_team( battle_load_timeout=None ):
 
     # Wait for battle to load
     logd( 'waiting for battle to load' )
-    time_last_seen_loading = time.time()
     while not detect_battle_combat() and not st.paused:
-        if detect_loading():
-            time_last_seen_loading = time.time()
-            logd( 'Battle is loading...' )
-        if battle_load_timeout is not None and (time.time()-time_last_seen_loading > battle_load_timeout):
-            raise TimeoutError( 'Failed to load battle' )
+        if detect_loading(): logd( 'loading...' )
+        else: logw( 'unknown state' )
         sleep(1.0)
     
     logi( 'Battle is loaded' )
@@ -590,7 +515,7 @@ def subjob_battle_combat( battle_state_unknown_timeout=5 ):
             error_count = 0
         # Battle interuptions (like events)
         elif has( 'event/Skip' ):
-            event_resolve()
+            subjob_event_resolve()
             error_count = 0
         # Unclear
         elif not has( 'mirror/mirror4/way/mirror4MapSign' ) and has( 'battle/trianglePause' ):
@@ -624,64 +549,28 @@ def subjob_battle_combat( battle_state_unknown_timeout=5 ):
             error_count += 1
         sleep(1.0)
 
-def mirror_shop_chair():
-    # Attempt to aoe heal
-    if find( 'mirror/mirror4/ProductCatalogue/ChairHealSinner' ):
-        click( 'mirror/mirror4/ProductCatalogue/ChairHealSinner' )
-        click( 'mirror/mirror4/ProductCatalogue/AllSinnerRest' )
-        click( 'event/Skip' )
-        click( 'event/Skip' )
-        if not click( 'event/Continue', can_fail=True ):
-            click( 'mirror/mirror4/ProductCatalogue/DontPurchase' )
-    
-    #FUTURE: fuse certain combos
-    
-    # Leave so event handler doesn't get stuck in loop
-    click( 'event/Leave' )
-    click( 'mirror/mirror4/whiteConfirm' )
-
-def mirror_shop_buy():
-    # Attempt to aoe heal
-    if find( 'mirror/mirror4/ProductCatalogue/ChairHealSinner' ):
-        click( 'mirror/mirror4/ProductCatalogue/ChairHealSinner' )
-        click( 'mirror/mirror4/ProductCatalogue/AllSinnerRest' )
-        click( 'event/Skip' )
-        if not click( 'event/Continue', can_fail=True ):
-            click( 'mirror/mirror4/ProductCatalogue/DontPurchase' )
-    
-    # Attempt to buy egos with remaining cash
-    ego_locs = [ Vec2(930,350), Vec2(1130,350), Vec2(780,450), Vec2(930,450), Vec2(1130,450) ]
-    for ego_loc in ego_locs:
-        input_mouse_click( ego_loc )
-        if click( 'mirror/mirror4/ProductCatalogue/ConfirmPurchase', can_fail=True ):
-            click( 'mirror/mirror4/way/Confirm' )
-    
-    # Leave so event handler doesn't get stuck in loop
-    click( 'event/Leave' )
-    click( 'mirror/mirror4/whiteConfirm' )
-
 def event_choice( choice: int ): # choice slot 0..2
     pos = has( 'event/Skip' )
     if pos:
         input_mouse_click( Vec2(pos.x+150, pos.y -100 +choice*100), wait=1.5 )
 
-def event_resolve( max_skip_attempts=10 ):
-    print( '[Main] SubJob - event_resolve' )
+def subjob_event_resolve( max_skip_attempts=10 ):
+    logi( 'start' )
     if not st.ai_events:
-        print( 'HUMAN Handle event' )
+        logc( 'HUMAN Handle event' )
         return control_wait_for_human()
     skip_attempts = 0
     while not st.paused:
         if has( 'mirror/mirror4/ProductCatalogue/ProductCatalogue' ):
             if has( 'mirror/mirror4/ProductCatalogue/FuseGifts' ):
-                print( 'Event is a shop (chair)' )
+                logd( 'Event is a shop (chair)' )
                 mirror_shop_chair() if st.ai_shop_chair else control_wait_for_human()
             elif has( 'mirror/mirror4/ProductCatalogue/PurchaseEGO' ):
-                print( 'Event is a shop (buy)' )
+                logd( 'Event is a shop (buy)' )
                 mirror_shop_buy() if st.ai_shop_buy else control_wait_for_human()
             break
         elif has( 'event/ChooseCheck' ):
-            print( 'Event choose sinner to perform check' )
+            logd( 'Event choose sinner to perform check' )
             prio = 'veryhigh high Normal Low VeryLow'.split()
             for p in prio:
                 if has( f'event/{p}' ):
@@ -692,20 +581,19 @@ def event_resolve( max_skip_attempts=10 ):
             click( 'event/Commence' )
             skip_attempts = 0
         elif has( 'event/Continue' ) or has( 'event/Proceed' ) or has( 'event/ToBattle' ) or has( 'event/CommenceBattle' ):
-            print( 'Event over' )
+            logd( 'Event over' )
             has( 'event/Continue' ) and click( 'event/Continue' )
             has( 'event/Proceed' ) and click( 'event/Proceed' )
             has( 'event/ToBattle' ) and click( 'event/ToBattle' )
             has( 'event/CommenceBattle' ) and click( 'event/CommenceBattle' )
             break
         elif has( 'event/Leave' ):
-            print( 'Event leave' )
+            logd( 'Event leave' )
             click( 'event/Leave' )
             click( 'mirror/mirror4/whiteConfirm' )
             break
         elif has( 'event/Choices' ):
-            print( 'Event bespoke choices' )
-            #FIXME fragile? maybe increase threshold. or exepct false positives?
+            logd( 'Event bespoke choices' )
             # "Result" from Continue/Proceed and even some Skips gets interpretted as "Choices" banner
             if has( 'encounter/UnDeadMechine1', threshold=0.9 ):
                 event_choice(1)
@@ -721,33 +609,71 @@ def event_resolve( max_skip_attempts=10 ):
                 event_choice(1)
             #skip_attempts = 0
         elif has( 'event/Skip' ):
-            print( f'Event attempting skip. Try {skip_attempts}' )
+            logd( f'Event attempting skip. Try {skip_attempts}' )
             click( 'event/Skip' )
             click( 'event/PassToGainEGO', can_fail=True )
             click( 'event/EGOGiftChoice', can_fail=True )
             skip_attempts += 1
         else:
-            print( 'Unknown event state' )
+            logw( 'Unknown event state' )
             skip_attempts += 1
         if skip_attempts > max_skip_attempts:
                 raise TimeoutError( 'Event exceeded max skip attempts. Must be stuck' )
         sleep(1.0)
 
+def mirror_shop_chair():
+    logd( 'Attempt to aoe heal' )
+    if find( 'mirror/mirror4/ProductCatalogue/ChairHealSinner' ):
+        click( 'mirror/mirror4/ProductCatalogue/ChairHealSinner' )
+        click( 'mirror/mirror4/ProductCatalogue/AllSinnerRest' )
+        click( 'event/Skip' )
+        click( 'event/Skip' )
+        if not click( 'event/Continue', can_fail=True ):
+            logd( 'Failed to heal' )
+            click( 'mirror/mirror4/ProductCatalogue/DontPurchase' )
+    
+    #FUTURE: fuse certain combos
+    
+    # Leave so event handler doesn't get stuck in loop
+    click( 'event/Leave' )
+    click( 'mirror/mirror4/whiteConfirm' )
+
+def mirror_shop_buy():
+    logd( 'Attempt to aoe heal' )
+    if find( 'mirror/mirror4/ProductCatalogue/ChairHealSinner' ):
+        click( 'mirror/mirror4/ProductCatalogue/ChairHealSinner' )
+        click( 'mirror/mirror4/ProductCatalogue/AllSinnerRest' )
+        click( 'event/Skip' )
+        if not click( 'event/Continue', can_fail=True ):
+            logd( 'Failed to heal' )
+            click( 'mirror/mirror4/ProductCatalogue/DontPurchase' )
+    
+    logd( 'Attempt blindly buying egos with remaining cash' )
+    ego_locs = [ Vec2(930,350), Vec2(1130,350), Vec2(780,450), Vec2(930,450), Vec2(1130,450) ]
+    for ego_loc in ego_locs:
+        input_mouse_click( ego_loc )
+        if click( 'mirror/mirror4/ProductCatalogue/ConfirmPurchase', can_fail=True ):
+            click( 'mirror/mirror4/way/Confirm' )
+    
+    # Leave so event handler doesn't get stuck in loop
+    click( 'event/Leave' )
+    click( 'mirror/mirror4/whiteConfirm' )
+
 def mirror_theme():
     for i in range(2):
         if find( 'mirror/mirror4/theme/EventTheme' ):
-            print('Found event theme')
+            logi('Found event theme')
             return click_drag( 'mirror/mirror4/theme/EventTheme', Vec2(0,300) )
         for i in range(1,41+1):
             if st.paused: return
             template= f'mirror/mirror4/theme/{i}'
             if find( template, timeout=0.1 ):
-                print( f'Found theme {i}' )
+                logd( f'Found theme {i}' )
                 return click_drag( template, Vec2(0,300) )
-            print( f'..theme {i} not found' )
+            logt( f'..theme {i} not found' )
         if i == 0: click( 'mirror/mirror4/theme/refresh' )
 
-    print( 'Attemping last ditch efforts to find a theme' )
+    loge( 'Attemping last ditch effort to find a theme via blind drag' )
     #if click( 'mirror/mirror4/theme/LBIcon', can_fail=True ): return # removed due to false positives
 
     input_mouse_drag( Vec2( 325, 250 ), Vec2( 325, 250+300 ), wait=2.0 )
@@ -762,13 +688,14 @@ def mirror_route_floor():
     if find( 'mirror/mirror4/way/Enter' ):
         return press( 'ENTER', wait=2.0 )
     for name,pos in routes.items():
-        print( f'Attempting route {name}' )
+        logt( f'Attempting route {name}' )
         input_mouse_click( pos, wait=0.9 )
         if find( 'mirror/mirror4/way/Enter' ): return press( 'ENTER', wait=2.0 )
     else: raise TimeoutError( 'Failed to find valid route' )
 
 def mirror_choose_encounter_reward():
     if click( 'mirror/mirror4/way/RewardCard/EGOGiftSpecCard', can_fail=True ):
+        logd( 'Got ideal reward card; EGO Gift Spec' )
         press( 'ENTER' )
         click( 'mirror/mirror4/way/Confirm', can_fail=True ) # confirm ego
     elif click( 'mirror/mirror4/way/RewardCard/EGOGiftCard', can_fail=True ):
@@ -792,6 +719,7 @@ def mirror_choose_ego_gift():
     press( 'ENTER' )
 
 def mirror_starting_gifts():
+    logd( 'Using Poise gift strategy' )
     click( 'mirror/mirror4/gift/Poise/Poise' )
     input_mouse_click( Vec2( 980, 280 ), wait=0.3 )
     input_mouse_click( Vec2( 980, 380 ), wait=0.3 )
@@ -803,90 +731,91 @@ def job_mirror_dungeon():
     logi( 'start' )
     error_zoom_count = 0
     while not st.paused:
+        reload_mod()
         if has( 'initMenu/drive' ):
-            print( 'Drive into mirror dungeon' )
+            logd( 'Drive into mirror dungeon' )
             click( 'initMenu/drive' )
             click( 'mirror/mirror4/MirrorDungeons' )
             if find( 'mirror/previousClaimReward' ):
-                print( 'HUMAN There is a reward from a pre-existing session. Please handle manually' )
+                logc( 'HUMAN There is a reward from a pre-existing session. Please handle manually' )
                 control_wait_for_human()
         elif has( 'mirror/mirror4/mirror4Normal' ):
-            print( 'Enter MD normal' )
+            logd( 'Enter MD normal' )
             click( 'mirror/mirror4/mirror4Normal' )
             if find( 'mirror/MirrorInProgress' ):
-                print( 'HUMAN Mirror is in progress. Please handle manually' )
+                logc( 'HUMAN Mirror is in progress. Please handle manually' )
                 control_wait_for_human()
             if click( 'mirror/mirror4/Enter', can_fail=True, wait=2 ) or click( 'mirror/mirror4/Resume', can_fail=True, wait=5 ):
-                print( 'Starting or resuming mirror' )
+                logd( 'Starting or resuming mirror' )
             else:
                 raise TimeoutError( 'Failed to start or resume mirror' )
         elif has( 'mirror/mirror4/gift/Poise/Poise' ):
-            print( 'Choose starting gifts' )
+            logd( 'Choose starting gifts' )
             mirror_starting_gifts() if st.ai_starting_gifts else control_wait_for_human()
         elif detect_loading():
-            print( 'Loading...' )
+            logt( 'Loading...' )
         elif has( 'mirror/mirror4/ClaimRewards' ):
-            print( 'Claiming final run rewards' )
-            print( 'HUMAN please gather images for win vs loss detection' )
+            logi( 'Claiming final run rewards' )
+            logc( 'HUMAN please gather images for win vs loss detection' )
             control_wait_for_human()
             press( 'ENTER' ) # first claim rewards button
-            press( 'ENTER' ) # box to spend modules #TODO probably check this for Win v Loss and option to decline
+            press( 'ENTER' ) # box to spend modules #FIXME probably check this for Win v Loss and option to decline
             press( 'ENTER' ) # popup to spend weekly
             press( 'ENTER', wait=2.0 ) # acquire lunacy
             press( 'ENTER', wait=2.0 ) # pass level up (long animation)
             if find( 'initMenu/Window' ): break
         elif has( 'mirror/mirror4/way/mirror4MapSign' ) and has( 'mirror/mirror4/way/Self', threshold=0.8 ):
-            print( 'Mirror floor routing' )
+            logd( 'Mirror floor routing' )
             mirror_route_floor() if st.ai_routing else control_wait_for_human()
         elif has( 'mirror/mirror4/way/ThemePack/SelectFloor' ) and has( 'mirror/mirror4/way/ThemePack/ThemePack' ):
-            print( 'Selecting floor' )
+            logd( 'Selecting floor' )
             mirror_theme() if st.ai_themes else control_wait_for_human()
         elif has( 'event/Skip' ):
-            print( 'Event in progress' )
-            event_resolve()
+            logd( 'Event in progress' )
+            subjob_event_resolve()
         elif detect_battle_combat():
-            print( 'Battle in progress' )
+            logd( 'Battle in progress' )
             subjob_battle_combat()
         elif has( 'team/Announcer', threshold=0.7 ) \
         and has( 'mirror/mirror4/firstTeamConfirm', threshold=0.6 ) \
         and not has( 'team/ClearSelection' ): # firstTeamConfirm was 0.5, 0.6 has false positives
-            print( 'Confirming initial team' )
+            logd( 'Confirming initial team' )
             press( 'ENTER' ) if st.ai_team_select else control_wait_for_human()
         elif detect_battle_prepare():
-            print( 'Battle preparation' )
-            subjob_battle_prepare_team() if st.ai_team_select else control_wait_for_human()
+            logd( 'Battle preparation' )
+            battle_prepare_team() if st.ai_team_select else control_wait_for_human()
         elif has( 'mirror/mirror4/way/RewardCard/RewardCardSign' ):
-            print( 'Choose reward card' )
+            logd( 'Choose reward card' )
             mirror_choose_encounter_reward() if st.ai_reward_cards else control_wait_for_human()
         elif has( 'mirror/mirror4/ego/egoGift' ):
-            print( 'Choosing ego gift of multiple choices' )
+            logd( 'Choosing ego gift of multiple choices' )
             mirror_choose_ego_gift() if st.ai_reward_egos else control_wait_for_human()
         elif has( 'mirror/mirror4/way/Confirm' ):
-            print( 'Confirming what I think is an ego gift' )
+            logd( 'Confirming what I think is an ego gift' )
             press( 'ENTER' )
         elif has( 'mirror/mirror4/way/Enter' ):
-            print( 'Assume in middle of accepting route node' )
+            logd( 'Assume in middle of accepting route node' )
             press( 'ESCAPE' )
         elif has( 'battle/confirm' ):
-            print( 'Assume post battle rewards confirm. Only should happen from crash' )
+            logd( 'Assume post battle rewards confirm. Only should happen from crash' )
             click( 'battle/confirm' )
         elif has( 'mirror/mirror4/way/mirror4MapSign' ) and not has( 'mirror/mirror4/way/Self', threshold=0.8 ):
-            print( f'DANGER Assume in routing screen with bad zoom or scroll. Seen {error_zoom_count} times' )
+            loge( f'DANGER Assume in routing screen with bad zoom or scroll. Seen {error_zoom_count} times' )
             error_zoom_count += 1
             if error_zoom_count > 3:
-                print( 'DANGER Attempting to fix zoom. This rarely works' )
+                loge( 'DANGER Attempting to fix zoom. This rarely works' )
                 input_mouse_scroll( Vec2( win.size.x*90//100, win.size.y//2 ), 10, True )
                 input_mouse_scroll( Vec2( win.size.x*90//100, win.size.y//2 ), 10, False )
                 input_mouse_scroll( Vec2( win.size.x*90//100, win.size.y//2 ), 20, True )
                 # scroll back in one step then hail mary for Self template
                 input_mouse_scroll( Vec2( win.size.x*90//100, win.size.y//2 ), 1, False )
                 if find( 'mirror/mirror4/way/Self', threshold=0.5 ):
-                    print( 'Chance we recovered?' )
+                    logd( 'Chance we recovered?' )
                 else:
                     raise TimeoutError( 'Bad route zoom or positioning. Need better fix strategy' )
                 # ? consider cog wheel > to window > then resume the run?
         else:
-            print( 'Unknown state during mirror' )
+            logw( 'Unknown state during mirror' )
         sleep(1.0)
 
 def job_resolve_until_home(): # True succeeded, False failed, None yieled for pause
@@ -896,14 +825,14 @@ def job_resolve_until_home(): # True succeeded, False failed, None yieled for pa
         elif click( 'goBack/leftarrow', can_fail=True, timeout=0.1 ): pass
         elif click( 'initMenu/CloseMail', can_fail=True, timeout=0.1 ): pass
         elif click( 'initMenu/cancel', can_fail=True, timeout=0.1 ): pass
-        elif detect_battle_prepare(): subjob_battle_prepare_team()
+        elif detect_battle_prepare(): battle_prepare_team()
         elif detect_battle_combat(): subjob_battle_combat()
         elif detect_loading(): pass
         else: return False
         sleep(1.0)
 
 def grind():
-    logi( f'Grind run v2 {st.stats_grind_runs_completed}/{st.stats_grind_runs_attempted}' )
+    logi( f'Grind run {st.stats_grind_runs_completed}/{st.stats_grind_runs_attempted}' )
     st.stats_grind_runs_attempted += 1
     step = 0
     while not st.paused:
@@ -935,8 +864,8 @@ def grind():
 ################################################################################
 
 def report_status():
-    logi( st )
-    logi( f'Mouse: {input_mouse_get_pos()}' )
+    print( st )
+    print( f'Mouse: {input_mouse_get_pos()}' )
 
 def control_toggle_pause():
     st.paused = not st.paused
@@ -955,7 +884,7 @@ def control_wait_for_human():
     logc( '>>> Waiting for human intervention <<<' )
     st.paused = True
     while st.paused:
-        sleep(0.1)
+        sleep(0.3)
 
 ################################################################################
 ## Driver
