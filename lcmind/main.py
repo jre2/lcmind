@@ -13,7 +13,6 @@ import win32con
 import win32gui
 
 #FUTURE: remove pyautogui (no multi-monitor and bloated), win32gui, win32api, and keyboard
-#FUTURE: record video of runs with cv2.VideoWriter and VideoWriter_fourcc, for debug
 
 '''Known bugs
 claim_battlepass: missed last mission. clicked too fast?
@@ -21,7 +20,108 @@ battle_prepare_team: incorrectly identifies 3/5 team as 5/5
 battle_prepare_team: stuck with 1 character since meursault wasn't in list. verify working after fix
 '''
 
+################################################################################
+## Defy organization
+################################################################################
+
 MANUAL_OVERRIDE_ROUTING = True
+
+@dataclass
+class State:
+    # Config
+    ai_team_mirror_sinner_priority: list[int] = (2,3,10,0,8,5, 1,6,7,9,11,8)
+    ai_team_lux_sinner_priority: list[int] = (2,3,10,0,1,5, 8,6,7,9,11,8)
+    stamina_daily_resets: int = 9
+
+    ai_themes: bool = True
+    ai_routing: bool = True
+    ai_reward_cards: bool = True
+    ai_reward_egos: bool = True
+    ai_events: bool = True
+    ai_shop_chair: bool = True
+    ai_shop_buy: bool = True
+    ai_starting_gifts: bool = True
+    ai_team_select: bool = True
+    stop_for_inspecting_unknowns: bool = False
+
+    log_video: bool = True
+
+    # State
+    daily_exp_incomplete: bool | None = None # None means unknown state
+    daily_thread_incomplete: bool | None = None
+    battle_team_type_mirror: bool = True
+
+    job: str | None = None
+    subjob: str | None = None
+    log_app_start_time: str = None
+
+    # Control
+    paused: bool = False
+    halt: bool = False
+    
+    # Stats
+    stats_grind_runs_attempted: int = 0
+    stats_grind_runs_completed: int = 0
+    stats_mirror_successes: int = 0
+    stats_mirror_failures: int = 0
+    stats_stamina_resets: int = 0
+
+    stats_dummy: int = 0
+
+def ai_set_manual_routing():
+    st.ai_themes = False
+    st.ai_routing = False
+    st.ai_reward_cards = False
+    st.ai_reward_egos = False
+    st.ai_events = False
+    st.ai_shop_chair = False
+    st.ai_shop_buy = False
+    st.ai_starting_gifts = False
+    st.ai_team_select = False
+    st.stop_for_inspecting_unknowns = True
+
+@dataclass
+class Vec2:
+    x: int = 0
+    y: int = 0
+
+def reload_mod( module=None ):
+    if 0: # alternative, but has issues with global state
+        import importlib
+        import sys
+        importlib.reload( sys.modules[ main.__module__ ] )
+        return
+    import ast
+    import copy
+    from   dataclasses import is_dataclass
+    import sys
+    module = module if module is not None else sys.modules[ reload_mod.__module__ ]
+
+    try:
+        # Fetch updated source code
+        with open( module.__file__, 'r' ) as f:
+            module_source = f.read()
+        
+        # Compile
+        module_ast = ast.parse( module_source )
+        mod_code = compile( module_ast, module.__file__, 'exec' )
+        mod_globals = copy.copy( module.__dict__ )
+        exec( mod_code, mod_globals )
+    except SyntaxError as e:
+        loge( f'SyntaxError: {e}' )
+        return
+
+    # Update the module except dataclasses, which require a full restart
+    # Must modify sys.modules object direct; globals() doesn't work
+    for name, obj in mod_globals.items():
+        if not is_dataclass( obj ):
+            module.__dict__[ name ] = obj
+    
+    logw( 'Reloaded module' )
+
+################################################################################
+## Logging
+################################################################################
 
 def log_time(): return time.strftime("%Y-%m-%d_%H-%M-%S", time.gmtime()) # not quite iso 8601
 
@@ -48,9 +148,9 @@ def log( msg='', level=None ):
     # Derive meta information by crawling the stack
     thread, job, subjob = None, None, None
     for frame in inspect.stack():
-        if thread is None and frame.function.startswith( 'thread_' ): thread = frame.function[6:]
-        if job is None and frame.function.startswith( 'job_' ): job = frame.function[3:]
-        if subjob is None and frame.function.startswith( 'subjob_' ): subjob = frame.function[6:]
+        if thread is None and frame.function.startswith( 'thread_' ): thread = frame.function[7:]
+        if job is None and frame.function.startswith( 'job_' ): job = frame.function[4:]
+        if subjob is None and frame.function.startswith( 'subjob_' ): subjob = frame.function[7:]
     
     # Generate tag from meta info, then final text
     tag = '.'.join( x for x in [level,thread,job,subjob] if x )
@@ -61,9 +161,9 @@ def log( msg='', level=None ):
     text_colored = text
     if   level == 'CRITICAL': text_colored = log_colorize_text( text, 'Red' )
     elif level == 'ERROR':    text_colored = log_colorize_text( text, 'Red' )
-    elif level == 'WARNING':  text_colored = log_colorize_text( text, 'Red' )
-    elif level == 'INFO':     text_colored = log_colorize_text( text, 'Yellow' ) #Yellow Cyan Green Magenta
-    elif level == 'DEBUG':    text_colored = log_colorize_text( text, 'Cyan' )
+    elif level == 'WARNING':  text_colored = log_colorize_text( text, 'Magenta' )
+    elif level == 'INFO':     text_colored = log_colorize_text( text, 'Yellow' ) # Yellow Cyan Green
+    elif level == 'DEBUG':    text_colored = log_colorize_text( text, 'Cyan' ) # Blue
     elif level == 'TRACE':    text_colored = log_colorize_text( text, 'White' )
 
     # Print to terminal and write to log file
@@ -72,12 +172,15 @@ def log( msg='', level=None ):
         f.write( text +'\n' )
 
 def logc( msg ): log( level='CRITICAL', msg=msg )
+def loge( msg ): log( level='ERROR', msg=msg )
+def logw( msg ): log( level='WARNING', msg=msg )
 def logi( msg ): log( level='INFO', msg=msg )
+def logd( msg ): log( level='DEBUG', msg=msg )
+def logt( msg ): log( level='TRACE', msg=msg )
 
-@dataclass
-class Vec2:
-    x: int = 0
-    y: int = 0
+################################################################################
+## Platform specific bot foundation library
+################################################################################
 
 @dataclass
 class Window:
@@ -88,43 +191,6 @@ class Window:
     hwnd: int = 0
     dc: int = 0
     screen_size: Vec2 = Vec2(0,0)
-
-@dataclass
-class State:
-    daily_exp_incomplete: bool | None = None # None means unknown state
-    daily_thread_incomplete: bool | None = None
-    battle_team_type_mirror: bool = True
-    paused: bool = False
-    halt: bool = False
-
-    job: str | None = None
-    subjob: str | None = None
-
-    ai_team_mirror_sinner_priority: list[int] = (2,3,10,0,8,5, 1,6,7,9,11,8)
-    ai_team_lux_sinner_priority: list[int] = (2,3,10,0,1,5, 8,6,7,9,11,8)
-    stamina_daily_resets: int = 9
-
-    ai_themes: bool = True
-    ai_routing: bool = True
-    ai_reward_cards: bool = True
-    ai_reward_egos: bool = True
-    ai_events: bool = True
-    ai_shop_chair: bool = True
-    ai_shop_buy: bool = True
-    ai_starting_gifts: bool = True
-    ai_team_select: bool = True
-    stop_for_inspecting_unknowns: bool = False
-
-    log_app_start_time: str = None
-    log_video: bool = True
-
-    stats_grind_runs: int = 0
-    stats_mirror_successes: int = 0
-    stats_mirror_failures: int = 0
-    stats_stamina_resets: int = 0
-
-win = Window()
-st = State()
 
 def win_init():
     '''Find window and normalize it'''
@@ -165,18 +231,6 @@ def win_screenshot():
     '''Take screenshot of window'''
     import pyautogui
     return pyautogui.screenshot( region=(win.pos.x,win.pos.y,win.size.x,win.size.y) )
-
-def __input_mouse_click_PostMessage( pos: Vec2, button='left' ):
-    '''Click mouse button at position. Not working for Limbus Company?'''
-    # Use PostMessage to avoid stealing mouse from human user
-    wParam = {'left':win32con.MK_LBUTTON, 'right':win32con.MK_RBUTTON}[button]
-    lParam = pos.y<<16 | pos.x
-    windll.user32.PostMessageA( win.hwnd, win32con.WM_ACTIVATE, win32con.WA_ACTIVE, 0 )
-    windll.user32.PostMessageA( win.hwnd, win32con.WM_LBUTTONDOWN, wParam, lParam )
-    windll.user32.PostMessageA( win.hwnd, win32con.WM_LBUTTONUP, 0, lParam )
-
-def sleep( seconds ):
-    time.sleep( seconds )
 
 def input_mouse_get_pos() -> Vec2:
     class CPoint( ctypes.Structure ):
@@ -248,8 +302,11 @@ def input_keyboard_press( key, wait_up=0.01, wait=0.3 ):
     win32api.keybd_event( k, 0, win32con.KEYEVENTF_KEYUP, 0 )
     sleep( 0.3 )
 
+def sleep( seconds ):
+    time.sleep( seconds )
+
 ################################################################################
-## General image bot library
+## General image bot library. Main verbs for jobs
 ################################################################################
 
 def img_find( template_name: str, threshold=0.8, use_best=True, use_grey_normalization=False, color_space=cv2.COLOR_RGB2GRAY ) -> Vec2 | None:
@@ -336,8 +393,8 @@ def toggle_pause():
 
 def halt():
     print( 'Halting...' )
-    st.paused = True
     st.halt = True
+    st.paused = True # halt implies paused so we can simply check paused in loops
 
 def wait_for_human():
     '''Waits for human to take care of something and press un-pause button (via hotkey thread)'''
@@ -802,6 +859,7 @@ def resolve_until_home():
 def grind():
     if st.paused: return
     logi( 'Grind run' )
+    st.stats_grind_runs_attempted += 1
 
     raise NotImplementedError( 'Grind not implemented' )
     if resolve_until_home() == False:
@@ -822,19 +880,35 @@ def grind():
     if st.paused: return
     mirror_dungeon()
 
-    st.stats_grind_runs += 1
+    st.stats_grind_runs_completed += 1
 
-def ai_set_manual_routing():
-    st.ai_themes = False
-    st.ai_routing = False
-    st.ai_reward_cards = False
-    st.ai_reward_egos = False
-    st.ai_events = False
-    st.ai_shop_chair = False
-    st.ai_shop_buy = False
-    st.ai_starting_gifts = False
-    st.ai_team_select = False
-    st.stop_for_inspecting_unknowns = True
+################################################################################
+## Driver
+################################################################################
+
+def test_job_1():
+    print( '    test_job_1 444' )
+
+def helper1():
+    print( '    helper1' )
+
+def test_job_2():
+    print( '    test_job_2 333' )
+    print( '        foobar' )
+    helper1()
+
+def test():
+    print( 'test start' )
+    while not st.halt:
+        print( f'test loop {st.stats_dummy}' )
+        reload_mod()
+
+        print( 'test_job_1', test_job_1, test_job_1() )
+
+        #test_job_2()
+
+        sleep(1)
+        st.stats_dummy += 1
 
 def thread_main():
     keyboard.add_hotkey( 'pause', toggle_pause )
@@ -845,30 +919,21 @@ def thread_main():
 
     logi( 'Starting grind loop' )
     while not st.halt:
-        grind()
+        #grind()
+        test()
         sleep(0.1)
     logc( 'halting' )
-
-################################################################################
-## Driver
-################################################################################
 
 def thread_video_log():
     if st.log_video is False: return
     fps = 30.0
     log_path = f'logs/video_{st.log_app_start_time}'
-    if 1:
-        fourcc = cv2.VideoWriter_fourcc( *"XVID" )
-        video = cv2.VideoWriter( f'{log_path}.avi', fourcc, fps, (win.size.x, win.size.y), isColor=True )
-    else:
-        fourcc = cv2.VideoWriter_fourcc( *"mp4v" ) # alternatively, hev1 h264 XVID
-        video = cv2.VideoWriter( f'{log_path}.mp4', fourcc, fps, (win.size.x, win.size.y), isColor=True )
-    frame_count = 0
+    fourcc = cv2.VideoWriter_fourcc( *"XVID" ) # mp4v .mp4 is much larger
+    video = cv2.VideoWriter( f'{log_path}.avi', fourcc, fps, (win.size.x, win.size.y), isColor=True )
     logi( 'Starting video log' )
     try:
         while not st.halt:
             frame_start = time.time()
-            frame_count += 1
 
             screen_img = cv2.cvtColor( numpy.array(win_screenshot()), cv2.COLOR_RGB2BGR )
             video.write( screen_img )
@@ -878,19 +943,20 @@ def thread_video_log():
                 sleep( 1/fps - frame_time )
     finally:
         video.release()
-        #cv2.destroyAllWindows()
     logc( 'halting' )
+
+st = State()
+win = Window()
 
 def main():
     st.log_app_start_time = log_time()
     thread_cap = threading.Thread( target=thread_video_log )
+    
     try:
-        win_init()
+        #win_init()
         thread_cap.start()
         thread_main()
     finally:
         win_cleanup()
         st.halt = True
         thread_cap.join()
-
-if __name__ == '__main__': main()
