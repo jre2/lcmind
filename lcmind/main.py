@@ -18,33 +18,28 @@ import win32con
 import win32gui
 
 #FUTURE: remove pyautogui (no multi-monitor and bloated), win32gui, win32api, and keyboard
-#FUTURE: detect failures and decline run, if configured to
 
 '''Known bugs
-battle_prepare_team: incorrectly identifies 3/5 team as 5/5. maybe misses 6/6 sometimes
-battle_prepare_team: fixed undoing rodion but need to verify fix
-
+battle_prepare_team: incorrectly identifies 3/5 team as 5/5, alerts 5/5 as undermanned (maybe fixed?)
 job_stamina_buy_with_lunacy: stops at 7 resets when should be 9
-
-subjob_event_resolve: Event bespoke choices seem fragile? has been working so far though
-claim_battlepass: missed last mission. clicked too fast?
+event_resolve: bespoke choices seem fragile? but has been working so far
 '''
 
 ################################################################################
 ## Defy organization
 ################################################################################
 
-MANUAL_OVERRIDE_ROUTING = False
-DISABLE_DPI_REQUIREMENT = False
-
 @dataclass
 class State:
     # Config
+        # strategy
     ai_team_mirror_sinner_priority: list[str] = ('Don Quixote', 'Ryoushu', 'Outis', 'Yi Sang', 'Rodion', 'Hong Lu', 'Faust', 'Heathcliff', 'Ishmael', 'Sinclair', 'Meursult', 'Gregor')
     ai_team_lux_sinner_priority: list[str] = ('Don Quixote', 'Ryoushu', 'Outis', 'Yi Sang', 'Rodion', 'Hong Lu', 'Faust', 'Heathcliff', 'Ishmael', 'Sinclair', 'Meursult', 'Gregor')
     stamina_daily_resets: int = 9
-    log_directory: str = 'R:/tmp/logs/limbus_company'
+    ai_manual_override_routing: bool = False # if true, ignores the normal AI settings below
+    mirror_decline_partial_rewards: bool = True # anything less than 100% is considered a failure/partial
 
+        # normal AI settings
     ai_themes: bool = True
     ai_routing: bool = True
     ai_reward_cards: bool = True
@@ -56,8 +51,13 @@ class State:
     ai_team_select: bool = True
     stop_for_inspecting_unknowns: bool = False
 
+        # logging
     log_video: bool = True
+    log_directory: str = 'R:/tmp/logs/limbus_company'
     log_levels_disabled: list[str] = ('TRACE',)
+
+        # misc
+    disable_dpi_requirements: bool = False # bot doesn't function well, but useful for debugging
 
     # State
     daily_exp_incomplete: bool | None = None # None means unknown state
@@ -225,7 +225,7 @@ def win_verify() -> str | None:
     logd( 'Verifying window DPI scaling' )
     dpi_x = windll.gdi32.GetDeviceCaps( win.dc, win32con.LOGPIXELSX ) # enums HORZRES DESKTOPHORZRES LOGPIXELSX
     dpi_y = windll.gdi32.GetDeviceCaps( win.dc, win32con.LOGPIXELSY )
-    if not DISABLE_DPI_REQUIREMENT:
+    if not st.disable_dpi_requirements:
         if win.dpi != Vec2(dpi_x,dpi_y): return f"Window DPI is {dpi_x},{dpi_y} instead of {win.dpi}"
 
     logd( 'Verifying window position and size' )
@@ -315,7 +315,7 @@ def sleep( seconds ):
 ## General image bot verbs for constructing jobs
 ################################################################################
 
-def img_find( template_name: str, threshold=0.8, use_best=True, use_grey_normalization=False, color_space=cv2.COLOR_RGB2GRAY ) -> Vec2 | None:
+def img_find( template_name: str, threshold=0.8, use_best=True, use_grey_normalization=False, color_space=cv2.COLOR_RGB2GRAY ) -> tuple[Vec2 | None, float]:
     # Load template image
     template_path = f'res/{template_name}.png'
     template_img = cv2.imread( template_path, cv2.IMREAD_GRAYSCALE )
@@ -334,33 +334,40 @@ def img_find( template_name: str, threshold=0.8, use_best=True, use_grey_normali
     res = cv2.matchTemplate( screen_img, template_img, cv2.TM_CCOEFF_NORMED )
 
     loc = None
+    _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc( res )
     if use_best:
-        _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc( res )
+        #print( f"img_find max_val={max_val} max_loc={max_loc}" )
         if max_val > threshold: loc = max_loc
-        else: return
+        else: return (None, max_val)
     else:
         locs = numpy.where( res >= threshold )
         if locs: loc = list(zip(*locs[::-1]))[0] # reverse x,y to y,x
-        else: return
+        else: return (None, max_val)
     
     # Find center of template at best match location
     h,w = template_img.shape
     center = Vec2( loc[0]+w//2, loc[1]+h//2 )
     logt( f"found {template_name} at {center}" )
-    return center
+    return (center, max_val)
 
 def find( template_name: str, threshold=0.8, use_best=True, timeout=1.0, can_fail=True ):
     t0 = time.time()
+    acc = -1
     while time.time()-t0 < timeout:
-        pos = img_find( template_name, threshold, use_best )
+        pos, acc = img_find( template_name, threshold, use_best )
         if pos: return pos
         sleep(0.1)
-    if not can_fail: raise TimeoutError( f"Failed to find {template_name} in {timeout} seconds" )
+    if not can_fail: raise TimeoutError( f"Failed to find {template_name} in {timeout} sec. Max acc {acc}" )
     return None
 
 def has( template_name: str, threshold=0.8, use_best=True ):
-    pos = img_find( template_name, threshold, use_best )
+    pos, _acc = img_find( template_name, threshold, use_best )
     return pos
+
+def has_acc( template_name: str ):
+    _pos, acc = img_find( template_name, use_best=True )
+    logt( f"ACC {acc:.6f} for IMG {template_name}" )
+    return acc
 
 def click( template_name: str, wait=0.6, can_fail=False, threshold=0.75, use_best=True, timeout=1.0 ):
     pos = find( template_name, threshold, use_best, timeout, can_fail )
@@ -457,7 +464,7 @@ def job_daily_exp():
     click( 'luxcavation/EXPDifficultyLv18' )
     logd( 'waiting for team select' )
     find( 'team/Announcer', threshold=0.7, timeout=3.0, can_fail=False )
-    battle_prepare_team()
+    battle_prepare_team( False )
     battle_combat()
     if not st.paused:
         click( 'goBack/leftarrow' ) # reset to home but also verify completion
@@ -475,19 +482,22 @@ def job_daily_thread():
     click( 'luxcavation/ThreadDifficultyLv20' )
     logd( 'waiting for team select' )
     find( 'team/Announcer', threshold=0.7, timeout=3.0, can_fail=False )
-    battle_prepare_team()
+    battle_prepare_team( False )
     battle_combat()
     if not st.paused:
         click( 'goBack/leftarrow' ) # reset to home but also verify completion
 
-def battle_prepare_team():
+def battle_prepare_team( battle_team_type_mirror:bool|None = None ):
+    battle_team_type_mirror = battle_team_type_mirror if battle_team_type_mirror is not None else st.battle_team_type_mirror
+
     logi( 'start' )
     # Choose team order
     sinners_in_order = ['Yi Sang', 'Faust', 'Don Quixote', 'Ryoushu', 'Meursult', 'Hong Lu', 'Heathcliff', 'Ishmael', 'Rodion', 'Sinclair', 'Outis', 'Gregor']
-    sinner_priority_list = st.ai_team_mirror_sinner_priority if st.battle_team_type_mirror else st.ai_team_lux_sinner_priority
+    sinner_priority_list = st.ai_team_mirror_sinner_priority if battle_team_type_mirror else st.ai_team_lux_sinner_priority
     if len(set( sinner_priority_list )) != 12:
         raise ValueError( 'Sinner priority list must contain all 12 sinners exactly once' )
-    full_template = 'team/FullTeam66' if st.battle_team_type_mirror else 'team/FullTeam55'
+    
+    full_template = 'team/FullTeam66' if battle_team_type_mirror else 'team/FullTeam55'
     if not find( full_template, threshold=0.96 ):
         logd( 'Team not prepared, redoing selection' )
         click( 'team/ClearSelection', wait=0.8 )
@@ -762,10 +772,13 @@ def mirror_starting_gifts():
 def job_mirror():
     logi( f'start' )
     st.stats_mirror_started += 1
+    num_seen_floors = 0
     error_zoom_count = 0
+    time_mirror_start = time.time()
     while not st.paused:
         reload_mod()
-        logd( f'record {st.stats_mirror_successes}W-{st.stats_mirror_failures}L / {st.stats_mirror_started}' )
+        time_so_far = ( time.time() - time_mirror_start ) / 60 # minutes
+        logd( f'{time_so_far:.1f}m. floor {num_seen_floors}/4. record {st.stats_mirror_successes}W-{st.stats_mirror_failures}L / {st.stats_mirror_started}' )
         if has( 'initMenu/drive' ):
             logd( 'Drive into mirror dungeon' )
             click( 'initMenu/drive' )
@@ -790,22 +803,40 @@ def job_mirror():
             logt( 'loading...' )
         elif has( 'mirror/mirror4/ClaimRewards' ):
             logi( 'Claiming final run rewards' )
-            logc( 'HUMAN please gather images for win vs loss detection' )
-            #control_wait_for_human()
-            st.stats_mirror_failures += 1
-            st.stats_mirror_successes += 1
-            press( 'ENTER' ) # first claim rewards button
-            press( 'ENTER' ) # box to spend modules #FIXME probably check this for Win v Loss and option to decline
+            sleep( 6.0 ) # long wait for panels to advance (multiple seconds), numbers to animate, etc
+            if mirror_result_judge( num_seen_floors ): # more floors seen increase odds of win but guarantee nothing
+                logi( 'Win detected' )
+                st.stats_mirror_successes += 1
+                click( 'mirror/mirror4/ClaimRewards' ) # 85.7%
+                click( 'mirror/mirror4/ClaimRewardsStep2' ) # 99.4%
+            else:
+                loge( 'Loss detected' )
+                st.stats_mirror_failures += 1
+                click( 'mirror/mirror4/ClaimRewards' ) # 85.7%
+                if st.mirror_decline_partial_rewards:
+                    loge( 'Declining rewards' )
+                    click( 'mirror/mirror4/GiveUpRewards' ) # 89.8%
+                    logc( "HUMAN Please check if there's a confirm for giving up rewards" ) #TODO check logs for this
+                else:
+                    click( 'mirror/mirror4/ClaimRewardsStep2' ) # 99.4%
+
             press( 'ENTER' ) # popup to spend weekly
             press( 'ENTER', wait=2.0 ) # acquire lunacy
             press( 'ENTER', wait=2.0 ) # pass level up (long animation)
+
             if find( 'initMenu/Window' ): break
+
+            # in case of failure, spam enter and hope for the best
+            for _ in range(5): press( 'ENTER' )
+            if find( 'initMenu/Window' ): break
+
         elif has( 'mirror/mirror4/way/mirror4MapSign' ) and has( 'mirror/mirror4/way/Self', threshold=0.8 ):
             logd( 'Mirror floor routing' )
             mirror_route_floor() if st.ai_routing else control_wait_for_human()
         elif has( 'mirror/mirror4/way/ThemePack/SelectFloor' ) and has( 'mirror/mirror4/way/ThemePack/ThemePack' ):
             logd( 'Select floor' )
             mirror_theme() if st.ai_themes else control_wait_for_human()
+            num_seen_floors += 1
         elif has( 'event/Skip' ):
             logd( 'Event' )
             event_resolve()
@@ -819,7 +850,7 @@ def job_mirror():
             press( 'ENTER' ) if st.ai_team_select else control_wait_for_human()
         elif detect_battle_prepare():
             logd( 'Battle prepare' )
-            battle_prepare_team() if st.ai_team_select else control_wait_for_human()
+            battle_prepare_team( True ) if st.ai_team_select else control_wait_for_human()
         elif has( 'mirror/mirror4/way/RewardCard/RewardCardSign' ):
             logd( 'Choose reward card' )
             mirror_choose_encounter_reward() if st.ai_reward_cards else control_wait_for_human()
@@ -853,6 +884,8 @@ def job_mirror():
         else:
             logw( 'Unknown state during mirror' )
         sleep(1.0)
+    time_so_far = ( time.time() - time_mirror_start ) / 60 # minutes
+    logd( f'end - {time_so_far:.1f}m. floor {num_seen_floors}/4. record {st.stats_mirror_successes}W-{st.stats_mirror_failures}L / {st.stats_mirror_started}' )
 
 def job_resolve_until_home(): # True succeeded, False failed, None yieled for pause
     logi( 'start' )
@@ -866,6 +899,51 @@ def job_resolve_until_home(): # True succeeded, False failed, None yieled for pa
         elif detect_loading(): pass
         else: return False
         sleep(1.0)
+
+def mirror_result_judge_panel() -> int|None:
+    # Panel 1 actual is expected 1: 99% & 99%, 3: 63% & 85.9%
+    # Panel 2 actual is expected 1: 55% & 99%, 3: 91% & 85.9%
+    # Panel 3 actual is expected 1: 57% & 85.5%, 3: 99% & 98.4%
+    panel = None
+    if has_acc( 'mirror/mirror4/MirrorResultFirstPanelSign1' ) > 0.95 \
+    and has_acc( 'mirror/mirror4/MirrorResultFirstPanelSign2' ) > 0.95:
+        panel = 0
+    if has_acc( 'mirror/mirror4/MirrorResultLastPanelSign1' ) > 0.95 \
+    and has_acc( 'mirror/mirror4/MirrorResultLastPanelSign2' ) > 0.95:
+        if panel is not None:
+            loge( 'ERROR: both first and last panel detected' )
+            panel = None
+        else:
+            panel = 2
+    logd( f"panel {panel}" )
+    return panel
+
+def mirror_result_judge( timeout_for_last_panel=3.0 ) -> bool:
+    logi( 'start' )
+    # First we wait until we're on the last panel, or have timed out
+    not_last_panel = False
+    t0 = time.time()
+    while mirror_result_judge_panel() != 2:
+        time_spent_waiting = time.time() - t0
+        if time_spent_waiting > timeout_for_last_panel:
+            loge( "Failed to wait for last panel. Either we're stuck on the wrong panel or somewhere else entirely" )
+            not_last_panel = True
+            break
+        logd( 'waiting for last panel...' )
+        sleep(1.0)
+    
+    # Now look for various signs that are always the same on 100% completion runs
+    # Actual 100% success is 99.6%+ for all signs
+    possible_signs = 3 if not_last_panel else 4
+    signs_of_success = 0
+    if has_acc( 'mirror/mirror4/MirrorResultSuccessFull' ) > 0.96: signs_of_success += 1
+    if has_acc( 'mirror/mirror4/MirrorResultSuccessBottom' ) > 0.96: signs_of_success += 1
+    if has_acc( 'mirror/mirror4/MirrorResultSuccess100' ) > 0.96: signs_of_success += 1
+    if has_acc( 'mirror/mirror4/MirrorResultSuccessPass30' ) > 0.96: signs_of_success += 1
+    
+    guess = signs_of_success >= (possible_signs-1) # 2/3, 3/4, or 4/4
+    logi( f'signs {signs_of_success}/{possible_signs} -> guess {guess}' )
+    return guess
 
 def grind():
     logi( f'Grind run {st.stats_grind_runs_completed}/{st.stats_grind_runs_attempted}' )
@@ -931,7 +1009,7 @@ def thread_main():
     keyboard.add_hotkey( 'end', control_halt )
     keyboard.add_hotkey( 'page up', report_status )
 
-    if MANUAL_OVERRIDE_ROUTING: ai_set_manual_routing()
+    if st.ai_manual_override_routing: ai_set_manual_routing()
 
     logi( 'Starting grind loop' )
     while not st.halt:
