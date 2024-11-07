@@ -320,6 +320,7 @@ def sleep( seconds ):
 def img_find( template_name: str, threshold=0.8, use_best=True, use_grey_normalization=False, color_space=cv2.COLOR_RGB2GRAY ) -> tuple[Vec2 | None, float]:
     # Load template image
     template_path = f'res/{template_name}.png'
+    if not os.path.exists( template_path ): raise FileNotFoundError( f'File DNE for template image {template_path}' )
     template_img = cv2.imread( template_path, cv2.IMREAD_GRAYSCALE )
     if template_img is None: raise FileNotFoundError( f'Failed to load template image {template_path}' )
 
