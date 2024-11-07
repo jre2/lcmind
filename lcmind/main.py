@@ -21,12 +21,18 @@ import win32gui
 
 '''Known bugs
 mirror_route: fixed with new loc but system is fragile and needs deeper testing. revamped disaser recovery but untested
+job_mirror: blindly accepts mirrors in progress and declines existing rewards. need to verify these
+mirror_choose_ego_gift: untested new fix for bug with ego+reward card combo
 
 battle_prepare_team: incorrectly identifies 3/5 team as 5/5, alerts 5/5 as undermanned (maybe fixed?)
 job_stamina_buy_with_lunacy: stops at 7 resets when should be 9
 event_resolve: bespoke choices seem fragile? but has been working so far
 '''
-
+'''Win-Loss records for various themes, for pseudo Poise team
+1-0 Degraded Gloom [34]
+1-0 Sinking Pang
+0-1 To be Cleaved (fire bird boss)
+'''
 ################################################################################
 ## Defy organization
 ################################################################################
@@ -38,10 +44,12 @@ class State:
     ai_team_mirror_sinner_priority: list[str] = ('Don Quixote', 'Ryoushu', 'Outis', 'Yi Sang', 'Rodion', 'Hong Lu', 'Faust', 'Heathcliff', 'Ishmael', 'Sinclair', 'Meursult', 'Gregor')
     ai_team_lux_sinner_priority: list[str] = ('Don Quixote', 'Ryoushu', 'Outis', 'Yi Sang', 'Rodion', 'Hong Lu', 'Faust', 'Heathcliff', 'Ishmael', 'Sinclair', 'Meursult', 'Gregor')
     stamina_daily_resets: int = 9
-    ai_manual_override_routing: bool = False # if true, ignores the normal AI settings below
+    
     mirror_decline_partial_rewards: bool = True # anything less than 100% is considered a failure/partial
+    mirror_decline_previous_rewards: bool = True # if there's a previous run to collect (which are always a partial)
 
-        # normal AI settings
+        # AI vs manual control settings
+    ai_manual_override_routing: bool = False # if true, ignores the normal AI settings below
     ai_themes: bool = True
     ai_routing: bool = True
     ai_reward_cards: bool = True
@@ -350,7 +358,7 @@ def img_find( template_name: str, threshold=0.8, use_best=True, use_grey_normali
     # Find center of template at best match location
     h,w = template_img.shape
     center = Vec2( loc[0]+w//2, loc[1]+h//2 )
-    logt( f"found {template_name} at {center}" )
+    logt( f"found {template_name} at {center} acc {max_val}" )
     return (center, max_val)
 
 def find( template_name: str, threshold=0.8, use_best=True, timeout=1.0, can_fail=True ):
@@ -716,6 +724,7 @@ def mirror_theme():
             except FileNotFoundError:
                 logt( f'Disabled or no file for theme {i}' )
             logt( f'..theme {i} not found' )
+        logd( 'Failed to locate a valid theme in first pass, trying again' )
         if i == 0: click( 'mirror/mirror4/theme/refresh' )
 
     loge( 'Attemping last ditch effort to find a theme via blind drag' )
@@ -726,6 +735,10 @@ def mirror_theme():
         raise TimeoutError( "Failed to find a valid theme, including randoming somehow" )
 
 def mirror_choose_encounter_reward():
+    if has( 'mirror/mirror4/way/RewardCard/FailedToChoose' ):
+        loge( 'Got notice for failure to choose reward, canceling so we can try again' )
+        click( 'mirror/mirror4/way/RewardCard/FailedToChooseCancel' )
+
     if click( 'mirror/mirror4/way/RewardCard/EGOGiftSpecCard', can_fail=True ):
         logd( 'Got ideal reward card; EGO Gift Spec' )
         press( 'ENTER' )
@@ -748,7 +761,12 @@ def mirror_choose_encounter_reward():
 def mirror_choose_ego_gift():
     click( 'mirror/mirror4/ego/egoGift' )
     click( 'mirror/mirror4/ego/SelectEGOGift' )
-    press( 'ENTER' )
+
+    logi( 'HUMAN trying new logic of verifying before pressing enter after ego gift' )
+    sleep(1)
+    if find( 'mirror/mirror4/ego/egoGift' ):
+        loge( 'HUMAN EGO Gift required ENTER key' )
+        press( 'ENTER' )
 
 def mirror_starting_gifts():
     logd( 'Using Poise gift strategy' )
@@ -772,7 +790,7 @@ def mirror_route_floor( click_self_can_fail=False ):
         logt( f'Attempting route {name}' )
         input_mouse_click( pos, wait=0.9 )
         if find( 'mirror/mirror4/way/Enter' ):
-            logd( 'Routed via {name} @ {pos}' )
+            logd( f'Routed via {name} @ {pos}' )
             return press( 'ENTER', wait=2.0 )
     else: raise TimeoutError( 'Failed to find valid route' )
 
@@ -815,14 +833,24 @@ def job_mirror():
             click( 'initMenu/drive' )
             click( 'mirror/mirror4/MirrorDungeons' )
             if find( 'mirror/previousClaimReward' ):
-                logc( 'HUMAN There is a reward from a pre-existing session. Please handle manually' )
-                control_wait_for_human()
+                logi( 'Prior run has rewards to claim' )
+                press( 'ENTER' )
+                if st.mirror_decline_previous_rewards:
+                    logi( 'Declining previous run rewards' )
+                    click( 'mirror/mirror4/GiveUpRewards' )
+                else:
+                    logi( 'Accepting previous run rewards' )
+                    click( 'mirror/mirror4/ClaimRewardsStep2' )
+                press( 'ENTER' )
+                press( 'ENTER', wait=2.0 ) # acquire lunacy
+                press( 'ENTER', wait=2.0 ) # pass level up (long animation)
         elif has( 'mirror/mirror4/mirror4Normal' ):
             logd( 'Enter MD normal' )
             click( 'mirror/mirror4/mirror4Normal' )
             if find( 'mirror/MirrorInProgress' ):
-                logc( 'HUMAN Mirror is in progress. Please handle manually' )
-                control_wait_for_human()
+                logc( 'Blindly accepting mirror in progress. Please verify video log' )
+                press( 'ENTER' )
+                press( 'ENTER' )
             if click( 'mirror/mirror4/Enter', can_fail=True, wait=2 ) or click( 'mirror/mirror4/Resume', can_fail=True, wait=5 ):
                 logd( 'Starting or resuming mirror' )
             else:
@@ -847,7 +875,6 @@ def job_mirror():
                 if st.mirror_decline_partial_rewards:
                     loge( 'Declining rewards' )
                     click( 'mirror/mirror4/GiveUpRewards' ) # 89.8%
-                    logc( "HUMAN Please check if there's a confirm for giving up rewards" ) #TODO check logs for this
                 else:
                     click( 'mirror/mirror4/ClaimRewardsStep2' ) # 99.4%
 
@@ -924,9 +951,9 @@ def job_resolve_until_home(): # True succeeded, False failed, None yieled for pa
         sleep(1.0)
 
 def mirror_result_judge_panel() -> int|None:
-    # Panel 1 actual is expected 1: 99% & 99%, 3: 63% & 85.9%
-    # Panel 2 actual is expected 1: 55% & 99%, 3: 91% & 85.9%
-    # Panel 3 actual is expected 1: 57% & 85.5%, 3: 99% & 98.4%
+    # Panel 0 actual is expected 1: 99% & 99%, 3: 63% & 85.9%
+    # Panel 1 actual is expected 1: 55% & 99%, 3: 91% & 85.9%
+    # Panel 2 actual is expected 1: 57% & 85.5%, 3: 99% & 98.4%
     panel = None
     if has_acc( 'mirror/mirror4/MirrorResultFirstPanelSign1' ) > 0.95 \
     and has_acc( 'mirror/mirror4/MirrorResultFirstPanelSign2' ) > 0.95:
