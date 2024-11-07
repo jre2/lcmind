@@ -20,6 +20,8 @@ import win32gui
 #FUTURE: remove pyautogui (no multi-monitor and bloated), win32gui, win32api, and keyboard
 
 '''Known bugs
+mirror_route: fixed with new loc but system is fragile and needs deeper testing. revamped disaser recovery but untested
+
 battle_prepare_team: incorrectly identifies 3/5 team as 5/5, alerts 5/5 as undermanned (maybe fixed?)
 job_stamina_buy_with_lunacy: stops at 7 resets when should be 9
 event_resolve: bespoke choices seem fragile? but has been working so far
@@ -722,19 +724,6 @@ def mirror_theme():
     if has( 'mirror/mirror4/way/ThemePack/SelectFloor' ) and has( 'mirror/mirror4/way/ThemePack/ThemePack' ):
         raise TimeoutError( "Failed to find a valid theme, including randoming somehow" )
 
-def mirror_route_floor():
-    routes = {  'init.middle': Vec2(740, 340), 'init.high': Vec2(740,125), 'init.low': Vec2(740, 550),
-                'midway.middle': Vec2(385, 340), 'midway.high': Vec2(385,100), 'midway.low': Vec2(385, 510) }
-
-    click( 'mirror/mirror4/way/Self' )
-    if find( 'mirror/mirror4/way/Enter' ):
-        return press( 'ENTER', wait=2.0 )
-    for name,pos in routes.items():
-        logt( f'Attempting route {name}' )
-        input_mouse_click( pos, wait=0.9 )
-        if find( 'mirror/mirror4/way/Enter' ): return press( 'ENTER', wait=2.0 )
-    else: raise TimeoutError( 'Failed to find valid route' )
-
 def mirror_choose_encounter_reward():
     if click( 'mirror/mirror4/way/RewardCard/EGOGiftSpecCard', can_fail=True ):
         logd( 'Got ideal reward card; EGO Gift Spec' )
@@ -768,6 +757,47 @@ def mirror_starting_gifts():
     input_mouse_click( Vec2( 980, 480 ), wait=0.3 )
     input_mouse_click( Vec2( 1060, 600 ), wait=0.3 )
     press( 'ENTER' )
+
+def mirror_route_floor( click_self_can_fail=False ):
+    routes = {  'init.middle': Vec2(740, 340), 'init.high': Vec2(740,125), 'init.low': Vec2(740, 550),
+                'midway.middle': Vec2(385, 340), 'midway.high': Vec2(385,100), 'midway.low': Vec2(385, 510),
+                'boss.high': Vec2(720,200),
+            } #TODO mid.high.y=100 seems too high? verify it works
+
+    click( 'mirror/mirror4/way/Self', can_fail=click_self_can_fail )
+    if find( 'mirror/mirror4/way/Enter' ):
+        return press( 'ENTER', wait=2.0 )
+    for name,pos in routes.items():
+        logt( f'Attempting route {name}' )
+        input_mouse_click( pos, wait=0.9 )
+        if find( 'mirror/mirror4/way/Enter' ):
+            logd( 'Routed via {name} @ {pos}' )
+            return press( 'ENTER', wait=2.0 )
+    else: raise TimeoutError( 'Failed to find valid route' )
+
+def mirror_route_recovery_leave_return():
+    loge( 'Attempting to leave and return to mirror run' )
+    click( 'mirror/mirror4/way/CogWheel', timeout=1.0 )
+    click( 'mirror/mirror4/way/ToWindow', timeout=1.0 )
+    find( 'initMenu/drive', can_fail=False, timeout=5.0 )
+def mirror_route_recovery_blind_spam():
+    loge( 'Attempting to blindly click routes even without observing Self' )
+    mirror_route_floor( click_self_can_fail=True )
+def mirror_route_recovery_zoom_fix():
+    loge( 'Attempting zoom fix (never works)' )
+    # go out and in a bit to maybe scoot towards center, then go full out then in one step
+    input_mouse_scroll( Vec2( win.size.x*90//100, win.size.y//2 ), 10, True )
+    input_mouse_scroll( Vec2( win.size.x*90//100, win.size.y//2 ), 10, False )
+    input_mouse_scroll( Vec2( win.size.x*90//100, win.size.y//2 ), 20, True )
+    input_mouse_scroll( Vec2( win.size.x*90//100, win.size.y//2 ), 1, False )
+    find( 'mirror/mirror4/way/Self', threshold=0.6, can_fail=False )
+def mirror_route_recovery():
+    try: return mirror_route_recovery_blind_spam()
+    except TimeoutError: loge( 'Recovery method failed, trying next' )
+    try: return mirror_route_recovery_zoom_fix()
+    except TimeoutError: loge( 'Recovery method failed, trying next' )
+    try: return mirror_route_recovery_leave_return()
+    except TimeoutError: loge( "Recovery method failed, we're screwed" ); raise TimeoutError( 'Failed to recover via any method' )
 
 def job_mirror():
     logi( f'start' )
@@ -867,20 +897,12 @@ def job_mirror():
             logd( 'Assume post battle rewards confirm. Only should happen from crash' )
             click( 'battle/confirm' )
         elif has( 'mirror/mirror4/way/mirror4MapSign' ) and not has( 'mirror/mirror4/way/Self', threshold=0.8 ):
-            loge( f'DANGER Assume in routing screen with bad zoom or scroll. Seen {error_zoom_count} times' )
+            loge( f'DANGER Assume in routing screen but with bad zoom or scroll. Seen {error_zoom_count} times' )
             error_zoom_count += 1
             if error_zoom_count > 3:
-                loge( 'DANGER Attempting to fix zoom. This rarely works' )
-                input_mouse_scroll( Vec2( win.size.x*90//100, win.size.y//2 ), 10, True )
-                input_mouse_scroll( Vec2( win.size.x*90//100, win.size.y//2 ), 10, False )
-                input_mouse_scroll( Vec2( win.size.x*90//100, win.size.y//2 ), 20, True )
-                # scroll back in one step then hail mary for Self template
-                input_mouse_scroll( Vec2( win.size.x*90//100, win.size.y//2 ), 1, False )
-                if find( 'mirror/mirror4/way/Self', threshold=0.5 ):
-                    logd( 'Chance we recovered?' )
-                else:
-                    raise TimeoutError( 'Bad route zoom or positioning. Need better fix strategy' )
-                # ? consider cog wheel > to window > then resume the run?
+                logc( 'Too many errors, trying dangerous recovery attempts' )
+                mirror_route_recovery()
+                error_zoom_count = 0
         else:
             logw( 'Unknown state during mirror' )
         sleep(1.0)
