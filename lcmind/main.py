@@ -5,11 +5,13 @@ import ctypes.wintypes
 import cv2
 from   dataclasses import dataclass, field
 import datetime
+import glob
 import importlib
 import inspect
 import keyboard
 import numpy
 import os
+import requests
 import sys
 import threading
 import time
@@ -22,11 +24,13 @@ import win32gui
 '''Known bugs
 mirror_route: fixed with new loc but system is fragile and needs deeper testing. revamped disaser recovery but untested
 job_mirror: blindly accepts mirrors in progress and declines existing rewards. need to verify these
+job_mirror: new logic for erroring out when too much time is spent in unknown state
 mirror_choose_ego_gift: untested new fix for bug with ego+reward card combo
 
 battle_prepare_team: incorrectly identifies 3/5 team as 5/5, alerts 5/5 as undermanned (maybe fixed?)
 job_stamina_buy_with_lunacy: stops at 7 resets when should be 9
-event_resolve: bespoke choices seem fragile? but has been working so far
+claim_battlepass: sometimes click gets missed, so there might be outstanding claims
+event_resolve: bespoke choices seem fragile but it's never actually failed yet
 '''
 '''Win-Loss records for various themes, for pseudo Poise team
 1-0 Degraded Gloom [34]
@@ -91,7 +95,9 @@ class State:
     stats_mirror_started: int = 0
     stats_stamina_resets: int = 0
     stats_battles_num: int = 0
+    stats_battle_rounds: int = 0
     stats_battles: dict = field( default_factory=lambda: {} ) # BattleName -> { turns, events, errors, completed }
+    stats_events_num: int = 0
 
     stats_dummy: int = 0
 
@@ -131,12 +137,92 @@ def reload_mod( module=None ):
 ## Logging
 ################################################################################
 
+def discord_test(): sys.modules[ main.__module__ ].__dict__['discord_test2']()
+def discord_test2():
+    logi( "Discord Test Start" )
+    try:
+        #log_discord_send( 'CRTICIAL', 'discord_test', 'The quick brown fox jumped over the lazy dog' )
+        log_discord_clear()
+        #log_discord_send( 'STATS', 'discord_test', 'Run stats', {'Runs':'1','Success':'1','Failures':'0','Avg Time':'1:23'} )
+        #log_discord_send( 'STATS', 'discord_test', 'Theme acc', [ ('Theme1',0.951), ('Theme2',0.952), ('Theme3',0.953) ] )
+    except Exception as e:
+        loge( f"Discord Test Error: {e}" )
+    logi( "Discord Test End" )
+
+def log_discord_clear():
+    # Load all outstanding messages
+    with open( f'{st.log_directory}/discord_messages.txt', 'r' ) as f:
+        sent_mids = [ mid for mid in f.read().split('\n') if mid ]
+    logi( f'Loaded {len(sent_mids)} messages for deletion' )
+    
+    # Attempt to delete each one
+    failed_to_delete_mids = []
+    for mid in sent_mids:
+        webhook_url = f"https://discord.com/api/webhooks/1185293371338661929/DEkEdArK862lbrOZwdH-RAP-9n9tbxdg6GiXRgNsM1sS_0Ych1O8_YLni-fJSvIX1aMj/messages/{mid}"
+        r = requests.delete( webhook_url, json={} )
+        if r.status_code != 204:
+            failed_to_delete_mids.append( mid )
+    
+    # Save the ones that failed
+    with open( f'{st.log_directory}/discord_messages.txt', 'w' ) as f:
+        for mid in failed_to_delete_mids:
+            f.write( f'{mid}\n' )
+    loge( f'Saved {len(failed_to_delete_mids)} messages for future deletion' )
+
+def log_discord_send( level, tag, msg, fields=None ):
+    # Reforge fields into list of tuples, with max 10 supported by Discord
+    fields = fields.items() if isinstance( fields, dict ) else fields or []
+    if len(fields) > 10:
+        fields = fields[:10]
+        logt( 'Discord message has too many fields ({len(fields)}). Truncating to 10' )
+
+    # Generate message with embed
+    darktide_colors = {
+        "gray": 0x979797,
+        "green": 0x5AAC65,
+        "blue": 0x4C82C2,
+        "purple": 0x8E5DC2,
+        "orange": 0xCE8632,
+        "red": 0xC4230E
+    }
+    level2color = {
+        "TRACE": 0xD3D3D3,      # Light Gray
+        "DEBUG": 0x808080,      # Gray
+        "INFO": 0x0000FF,       # Blue
+        "WARNING": 0xFFFF00,    # Yellow
+        "ERROR": 0xFF0000,      # Red
+        "CRITICAL": 0x8B0000,   # Dark Red
+        "STATS": 0x5AAC65,      # Green
+    }
+    emb = {
+        'title': f"{tag}",
+        'color': level2color[ level ],
+        'description': f"{msg}",
+        'footer': { 'text': f"Footer" },
+        'fields': [],
+    }
+    for k,v in fields:
+        emb['fields'].append( {'name':str(k), 'value':str(v), 'inline':True} )
+
+    # Send message
+    webhook_url = f"https://discord.com/api/webhooks/1185293371338661929/DEkEdArK862lbrOZwdH-RAP-9n9tbxdg6GiXRgNsM1sS_0Ych1O8_YLni-fJSvIX1aMj?wait=true"
+    r = requests.post( webhook_url, json={'embeds': [emb]} )
+    if r.status_code != 200:
+        loge( f'Discord Request Error {r.status_code}: {r.text}' )
+        return
+
+    # Save message id for later deletion
+    msg_id = r.json()['id']
+    with open( f'{st.log_directory}/discord_messages.txt', 'a' ) as f:
+        f.write( f'{msg_id}\n' )
+
 def logc( msg ): log( level='CRITICAL', msg=msg )
 def loge( msg ): log( level='ERROR', msg=msg )
 def logw( msg ): log( level='WARNING', msg=msg )
 def logi( msg ): log( level='INFO', msg=msg )
 def logd( msg ): log( level='DEBUG', msg=msg )
 def logt( msg ): log( level='TRACE', msg=msg )
+def log_stats( msg, kvs=None ): log( level='STATS', msg=msg, kvs=kvs )
 
 def log_time(): return time.strftime("%Y-%m-%d_%H-%M-%S", time.gmtime()) # not quite iso 8601
 def log_colorize_text( text:str, fg:str|None=None, bg:str|None=None, mode:str|None=None ) -> str:
@@ -158,7 +244,7 @@ def log_colorize_text( text:str, fg:str|None=None, bg:str|None=None, mode:str|No
     code_end = ESC+CSI+'m'
     return code_begin + text + code_end
 
-def log( msg='', level=None ):
+def log( msg='', level=None, kvs=None ):
     # Derive meta information by crawling the stack
     thread, job, subjob, caller = None, None, None, None
     for frame in inspect.stack():
@@ -173,21 +259,29 @@ def log( msg='', level=None ):
     # Generate tag from meta info, then final text
     tag = '.'.join( x for x in [mini_time,level,job,caller] if x )
     tag = f'[{tag}]'
-    text = f'{tag} {msg}'
+    text = f'{tag} {msg} {kvs}' if kvs is not None else f'{tag} {msg}'
+
+    tag_discord = '.'.join( x for x in [job,caller] if x )
+    text_discord = f'{msg}'
 
     # Colorized version for terminal output, based on log level
     text_colored = text
     if   level == 'CRITICAL': text_colored = log_colorize_text( text, 'Red' )
     elif level == 'ERROR':    text_colored = log_colorize_text( text, 'Red' )
     elif level == 'WARNING':  text_colored = log_colorize_text( text, 'Magenta' )
-    elif level == 'INFO':     text_colored = log_colorize_text( text, 'Yellow' ) # Green
+    elif level == 'INFO':     text_colored = log_colorize_text( text, 'Yellow' )
     elif level == 'DEBUG':    text_colored = log_colorize_text( text, 'Cyan' ) # Blue
     elif level == 'TRACE':    text_colored = log_colorize_text( text, 'White', mode='Dim' )
+    elif level == 'STATS':     text_colored = log_colorize_text( text, 'Green' )
 
     # Print to terminal and write to log file
     if level not in st.log_levels_disabled: print( text_colored )
+
     with open( f'{st.log_directory}/console_{st.log_app_start_time}.txt', 'a' ) as f:
         f.write( text_colored +'\n' )
+    
+    if level in ['CRITICAL', 'STATS']:
+        log_discord_send( level, tag_discord, text_discord, kvs )
 
 ################################################################################
 ## Platform specific functionality for constructing basic image bot verbs
@@ -530,7 +624,7 @@ def battle_prepare_team( battle_team_type_mirror:bool|None = None ):
     logd( 'waiting for battle to load' )
     while not detect_battle_combat() and not st.paused:
         if detect_loading(): logd( 'loading...' )
-        else: logw( 'unknown state' )
+        else: logw( 'unknown state' ) #TODO consider pressing ENTER if stuck
         sleep(1.0)
     
     logi( 'Battle is loaded' )
@@ -539,14 +633,15 @@ def battle_combat( battle_state_unknown_timeout=5 ):
     logi( 'start' )
     error_count = 0
     stats = { 'turns':0, 'events':0, 'completed':False, 'errors':0 }
-    st.stats_battles_num += 1
     st.stats_battles[ st.stats_battles_num ] = stats
+    st.stats_battles_num += 1
     while not st.paused: # yields for pause, so don't assume function return means battle is over
         reload_mod()
         logt( f'stats {stats}' )
         # Regular combat
         if detect_battle_combat():
             stats[ 'turns' ] += 1
+            st.stats_battle_rounds += 1
             logd( f"Turn {stats[ 'turns' ]} -> WinRate" )
             press( 'p' )
             press( 'ENTER' )
@@ -566,10 +661,9 @@ def battle_combat( battle_state_unknown_timeout=5 ):
             error_count = 0
         # Unclear
         elif not has( 'mirror/mirror4/way/mirror4MapSign' ) and has( 'battle/trianglePause' ):
-            logc( 'JMR unclear state but other bot checks for this and hits the play button' )
+            logd( 'Manager level up' )
             click( 'battle/trianglePause' )
-            if st.stop_for_inspecting_unknowns:
-                control_wait_for_human() #FIXME: figure out what this is for. current guess is manager level up screen?
+            press( 'ENTER' )
             error_count = 0
         # End of battle
         elif has( 'battle/levelUpConfirm' ):
@@ -606,6 +700,7 @@ def event_choice( choice: int ): # choice slot 0..2
 
 def event_resolve( max_skip_attempts=10 ):
     logi( 'start' )
+    st.stats_events_num += 1
     if not st.ai_events:
         logc( 'HUMAN Handle event' )
         return control_wait_for_human()
@@ -709,7 +804,89 @@ def mirror_shop_buy():
     click( 'event/Leave' )
     click( 'mirror/mirror4/whiteConfirm' )
 
-def mirror_theme():
+def mirror_theme( refresh_available=True ):
+    logt( 'Waiting for very slow pack animations, to increase image detection stability' )
+    sleep(3)
+    logd( 'Identification based on new named theme image templates' )
+    themes = {}
+    for path in glob.glob('res/mirror/mirror4/jmr_theme/*'):
+        name = os.path.basename( path ).split('.')[0]
+        if name == 'Thumbs': continue # windows thumbs.db junk
+        template = f'mirror/mirror4/jmr_theme/{name}'
+        themes[ name ] = has_acc( template )
+    sorted_by_acc = sorted( themes.items(), key=lambda x:x[1], reverse=True )
+    log_stats( 'Theme accuracies (new ver)', sorted_by_acc )
+    # lowest correct 98.5%, highest incorrect 50.7% run 1 floor 1
+    # lowest correct 91.3%, highest incorrect 68.9% run 1 floor 2
+    # lowest correct 92.7%, highest incorrect 51.5% run 1 floor 3. P&Pv1 92.7, P&Pv2 99.4
+    # lowest correct 99.4%, highest incorrect 58.9% run 1 floor 4
+    # lowest correct 85.3%/96.3%, highest incorrect 73.5% run 2 floor 1, 85->98% on 2nd check
+    # lowest correct 91.3%, highest incorrect 72.4% run 2 floor 2. first run was awful (63-88%). added delay to fix
+    # lowest correct 98.4%, highest incorrect 65.3% run 2 floor 3
+    # lowest correct 98.1%, highest incorrect 65.2% run 2 floor 4
+    # lowest correct 96.1%, highest incorrect 74.2% run 3 floor 1
+    # lowest correct 91.3%, highest incorrect 70.8% run 3 floor 2
+    # lowest correct 98.2%, highest incorrect 51.4% run 3 floor 3
+    
+    if 1:
+        logd( 'Info about old theme logic' )
+        themes = {}
+        for i in range(1,41+1):
+            template= f'mirror/mirror4/theme/{i}'
+            try:
+                themes[ i ] = has_acc( template )
+            except FileNotFoundError:
+                themes[ i ] = -1 # disabled or no file
+        sorted_by_acc_old = sorted( themes.items(), key=lambda x:x[1], reverse=True )
+        log_stats( 'Theme accuracies (old ver)', sorted_by_acc_old )
+    # lowest correct 86.7%, highest incorrect 76.2% run 1 floor 1
+    # lowest correct 94.2%, highest incorrect 74.9% run 1 floor 2
+    # lowest correct ----%, highest incorrect 68.2% run 1 floor 3
+    # lowest correct 88.6%, highest incorrect 70.5% run 1 floor 4
+    # lowest correct 93.7%, highest incorrect 76.3% run 2 floor 1
+    # lowest correct 94.2%, highest incorrect 74.9% run 2 floor 2
+    # lowest correct 85.9%, highest incorrect 70.5% run 2 floor 4
+    # lowest correct 86.7%, highest incorrect 76.2% run 3 floor 1
+    # lowest correct 76.8%, highest incorrect 68.3% run 3 floor 3 # 76.8 for correct but shadowed
+    
+    logd( 'Priority based selection method' )
+    theme_priorities = {
+        'TheForgotten':100,
+        'TheOutcast':80,
+        'AutomatedFactory':30,
+        'TheUnloving':70,
+        'BurningHaze':-1, 'ToBeCleaved':-1, 'EmotionalFlood':-1, 'SeasonOfTheFlame':-1,
+        } # 0 is the default for themes not given a priority
+    options = sorted_by_acc[:4]
+    logd( f'The top 4 identifications are the baseline options: {options}' )
+    options = [ (theme,acc) for theme,acc in sorted_by_acc[:4] if acc > 0.85 ]
+    logd( f'Now cull anything under 85% acc: {options}' )
+    options = [ theme for theme,acc in options ]
+    logd( f'Now strip to just names: {options}' )
+    options = { theme: theme_priorities.get( theme, 0 ) for theme in options }
+    logd( f'Now pair with priority: {options}' )
+    options = sorted( options, key=options.get, reverse=True )
+    logd( f'Now sorted by priority {options}' )
+
+    logd( 'Now actually performing drag on best options in order' )
+    #return control_wait_for_human()
+    for name in options:
+        template = f'mirror/mirror4/jmr_theme/{name}'
+        logd( f'Trying theme {name}' )
+        click_drag( template, Vec2(0,300) )
+        if not has( 'mirror/mirror4/way/ThemePack/SelectFloor' ) or not has( 'mirror/mirror4/way/ThemePack/ThemePack' ):
+            return
+    else: # no drags worked or there weren't an valid options in the first place
+        if refresh_available:
+            loge( f'Failed to drag any of {len(options)} options. Trying refresh' )
+            return mirror_theme( refresh_available=False )
+        else:
+            loge( f'Failed to drag any of {len(options)} options. Refresh already used. Trying blind drag' )
+            input_mouse_drag( Vec2( 325, 250 ), Vec2( 325, 250+300 ), wait=2.0 )
+    if has( 'mirror/mirror4/way/ThemePack/SelectFloor' ) and has( 'mirror/mirror4/way/ThemePack/ThemePack' ):
+        raise TimeoutError( "Failed to find a valid theme, including randoming somehow" )
+
+def __mirror_theme_old():
     for i in range(2):
         if find( 'mirror/mirror4/theme/EventTheme' ):
             logi('Found event theme')
@@ -818,16 +995,23 @@ def mirror_route_recovery():
     try: return mirror_route_recovery_leave_return()
     except TimeoutError: loge( "Recovery method failed, we're screwed" ); raise TimeoutError( 'Failed to recover via any method' )
 
-def job_mirror():
+def job_mirror( max_error_unknowns_count=10 ):
     logi( f'start' )
     st.stats_mirror_started += 1
     num_seen_floors = 0
+    num_routed_nodes = 0
     error_zoom_count = 0
+    error_unknowns_count = 0
     time_mirror_start = time.time()
+
+    st.stats_battle_rounds = 0
+    st.stats_events_num = 0
     while not st.paused:
         reload_mod()
+        should_reset_error_unknowns = True
         time_so_far = ( time.time() - time_mirror_start ) / 60 # minutes
         logd( f'{time_so_far:.1f}m. floor {num_seen_floors}/4. record {st.stats_mirror_successes}W-{st.stats_mirror_failures}L / {st.stats_mirror_started}' )
+
         if has( 'initMenu/drive' ):
             logd( 'Drive into mirror dungeon' )
             click( 'initMenu/drive' )
@@ -882,6 +1066,12 @@ def job_mirror():
             press( 'ENTER', wait=2.0 ) # acquire lunacy
             press( 'ENTER', wait=2.0 ) # pass level up (long animation)
 
+            log_stats( 'Run Stats', {
+                'wins':st.stats_mirror_successes, 'losses':st.stats_mirror_failures, 'starts':st.stats_mirror_started,
+                'duration':f'{time_so_far:.1f}', 'nodes':num_routed_nodes, 'rounds':st.stats_battle_rounds,
+                'events':st.stats_events_num, 'floors':num_seen_floors
+                } )
+
             if find( 'initMenu/Window' ): break
 
             # in case of failure, spam enter and hope for the best
@@ -890,11 +1080,17 @@ def job_mirror():
 
         elif has( 'mirror/mirror4/way/mirror4MapSign' ) and has( 'mirror/mirror4/way/Self', threshold=0.8 ):
             logd( 'Mirror floor routing' )
+            num_routed_nodes += 1
             mirror_route_floor() if st.ai_routing else control_wait_for_human()
         elif has( 'mirror/mirror4/way/ThemePack/SelectFloor' ) and has( 'mirror/mirror4/way/ThemePack/ThemePack' ):
-            logd( 'Select floor' )
+            logd( 'Selecting floor' )
             mirror_theme() if st.ai_themes else control_wait_for_human()
             num_seen_floors += 1
+            log_stats( 'Run Stats', {
+                'wins':st.stats_mirror_successes, 'losses':st.stats_mirror_failures, 'starts':st.stats_mirror_started,
+                'duration':f'{time_so_far:.1f}', 'nodes':num_routed_nodes, 'rounds':st.stats_battle_rounds,
+                'events':st.stats_events_num, 'floors':num_seen_floors
+                } )
         elif has( 'event/Skip' ):
             logd( 'Event' )
             event_resolve()
@@ -932,7 +1128,12 @@ def job_mirror():
                 mirror_route_recovery()
                 error_zoom_count = 0
         else:
-            logw( 'Unknown state during mirror' )
+            logw( f'Unknown state during mirror. Errors {error_unknowns_count}' )
+            error_unknowns_count += 1
+            should_reset_error_unknowns = False
+            if error_unknowns_count > max_error_unknowns_count:
+                raise TimeoutError( f'Too long in unknown state. Errors {error_unknowns_count}' )
+        if should_reset_error_unknowns: error_unknowns_count = 0
         sleep(1.0)
     time_so_far = ( time.time() - time_mirror_start ) / 60 # minutes
     logd( f'end - {time_so_far:.1f}m. floor {num_seen_floors}/4. record {st.stats_mirror_successes}W-{st.stats_mirror_failures}L / {st.stats_mirror_started}' )
@@ -1039,13 +1240,13 @@ def control_toggle_pause():
         win_fix()
 
 def control_halt():
-    logc( 'Halting...' )
+    loge( 'Halting...' )
     st.halt = True
     st.paused = True # halt implies paused so we can simply check paused in loops
 
 def control_wait_for_human():
     '''Waits for human to take care of something and press un-pause button (via hotkey thread)'''
-    logc( '>>> Waiting for human intervention <<<' )
+    logc( '# Waiting for human intervention #' )
     st.paused = True
     while st.paused:
         sleep(0.3)
@@ -1058,6 +1259,7 @@ def thread_main():
     keyboard.add_hotkey( 'home', control_toggle_pause )
     keyboard.add_hotkey( 'end', control_halt )
     keyboard.add_hotkey( 'page up', report_status )
+    keyboard.add_hotkey( 'page down', discord_test )
 
     if st.ai_manual_override_routing: ai_set_manual_routing()
 
@@ -1068,11 +1270,10 @@ def thread_main():
             try:
                 grind()
             except TimeoutError as e:
-                logc( f'Error: {e}' )
-                logc( 'Desparation restart in 5 seconds' )
+                logc( f'Error: {e}. Desparation restart in 5 seconds' )
                 sleep( 5.0 )
         sleep(0.1)
-    logc( 'halting' )
+    loge( 'halting' )
 
 def thread_video_log():
     if st.log_video is False: return
@@ -1093,7 +1294,7 @@ def thread_video_log():
                 sleep( 1/fps - frame_time )
     finally:
         video.release()
-    logc( 'halting' )
+    loge( 'halting' )
 
 st = State()
 win = Window()
