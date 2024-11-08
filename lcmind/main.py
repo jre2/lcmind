@@ -26,11 +26,11 @@ mirror_route: fixed with new loc but system is fragile and needs deeper testing.
 job_mirror: blindly accepts mirrors in progress and declines existing rewards. need to verify these
 job_mirror: new logic for erroring out when too much time is spent in unknown state
 mirror_choose_ego_gift: untested new fix for bug with ego+reward card combo
+event_resolve: bespoke choices seem fragile. changed logic to reflect event_choice being 0 indexed, choices will be very different now
 
 battle_prepare_team: incorrectly identifies 3/5 team as 5/5, alerts 5/5 as undermanned (maybe fixed?)
 job_stamina_buy_with_lunacy: stops at 7 resets when should be 9
 claim_battlepass: sometimes click gets missed, so there might be outstanding claims
-event_resolve: bespoke choices seem fragile but it's never actually failed yet
 '''
 '''Win-Loss records for various themes, for pseudo Poise team
 1-0 Degraded Gloom [34]
@@ -77,6 +77,7 @@ class State:
     daily_exp_incomplete: bool | None = None # None means unknown state
     daily_thread_incomplete: bool | None = None
     battle_team_type_mirror: bool = True
+    current_floor_theme: str | None = None
 
     job: str | None = None
     subjob: str | None = None
@@ -202,6 +203,7 @@ def log_discord_send( level, tag, msg, fields=None ):
         'fields': [],
     }
     for k,v in fields:
+        if isinstance(v,float): v = f'{v:.4f}'
         emb['fields'].append( {'name':str(k), 'value':str(v), 'inline':True} )
 
     # Send message
@@ -741,17 +743,17 @@ def event_resolve( max_skip_attempts=10 ):
             logd( 'Event bespoke choices' )
             # "Result" from Continue/Proceed and even some Skips gets interpretted as "Choices" banner
             if has( 'encounter/UnDeadMechine1', threshold=0.9 ):
-                event_choice(1)
+                event_choice(0)
             elif has( 'encounter/UnDeadMechine2', threshold=0.9 ):
-                event_choice(2)
+                event_choice(1)
             elif has( 'encounter/PinkShoes', threshold=0.9 ):
-                event_choice(2)
+                event_choice(1)
             elif has( 'encounter/RedKillClock', threshold=0.9 ):
+                event_choice(0)
                 event_choice(1)
-                event_choice(2)
             else:
-                event_choice(2)
                 event_choice(1)
+                event_choice(0)
             #skip_attempts = 0
         elif has( 'event/Skip' ):
             logd( f'Event attempting skip. Try {skip_attempts}' )
@@ -804,18 +806,19 @@ def mirror_shop_buy():
     click( 'event/Leave' )
     click( 'mirror/mirror4/whiteConfirm' )
 
-def mirror_theme( refresh_available=True ):
-    logt( 'Waiting for very slow pack animations, to increase image detection stability' )
+def mirror_theme( floor, refresh_available=True ):
+    st.current_floor_theme = None
+    logd( f'Identifying theme packs for floor {floor}' )
+    logt( 'waiting for very slow animations to avoid incorrect image detection...' )
     sleep(3)
-    logd( 'Identification based on new named theme image templates' )
     themes = {}
-    for path in glob.glob('res/mirror/mirror4/jmr_theme/*'):
-        name = os.path.basename( path ).split('.')[0]
+    for path in glob.glob('res/mirror/mirror4/jmr_theme/*.png'):
+        name = os.path.basename( path )[:-4]
         if name == 'Thumbs': continue # windows thumbs.db junk
         template = f'mirror/mirror4/jmr_theme/{name}'
         themes[ name ] = has_acc( template )
     sorted_by_acc = sorted( themes.items(), key=lambda x:x[1], reverse=True )
-    log_stats( 'Theme accuracies (new ver)', sorted_by_acc )
+    #log_stats( 'Theme accuracies (new ver)', sorted_by_acc[:6] )
     # lowest correct 98.5%, highest incorrect 50.7% run 1 floor 1
     # lowest correct 91.3%, highest incorrect 68.9% run 1 floor 2
     # lowest correct 92.7%, highest incorrect 51.5% run 1 floor 3. P&Pv1 92.7, P&Pv2 99.4
@@ -828,7 +831,7 @@ def mirror_theme( refresh_available=True ):
     # lowest correct 91.3%, highest incorrect 70.8% run 3 floor 2
     # lowest correct 98.2%, highest incorrect 51.4% run 3 floor 3
     
-    if 1:
+    if 0:
         logd( 'Info about old theme logic' )
         themes = {}
         for i in range(1,41+1):
@@ -838,7 +841,7 @@ def mirror_theme( refresh_available=True ):
             except FileNotFoundError:
                 themes[ i ] = -1 # disabled or no file
         sorted_by_acc_old = sorted( themes.items(), key=lambda x:x[1], reverse=True )
-        log_stats( 'Theme accuracies (old ver)', sorted_by_acc_old )
+        #log_stats( 'Theme accuracies (old ver)', sorted_by_acc_old[:6] )
     # lowest correct 86.7%, highest incorrect 76.2% run 1 floor 1
     # lowest correct 94.2%, highest incorrect 74.9% run 1 floor 2
     # lowest correct ----%, highest incorrect 68.2% run 1 floor 3
@@ -851,37 +854,71 @@ def mirror_theme( refresh_available=True ):
     
     logd( 'Priority based selection method' )
     theme_priorities = {
-        'TheForgotten':100,
-        'TheOutcast':80,
-        'AutomatedFactory':30,
-        'TheUnloving':70,
-        'BurningHaze':-1, 'ToBeCleaved':-1, 'EmotionalFlood':-1, 'SeasonOfTheFlame':-1,
-        } # 0 is the default for themes not given a priority
-    options = sorted_by_acc[:4]
-    logd( f'The top 4 identifications are the baseline options: {options}' )
-    options = [ (theme,acc) for theme,acc in sorted_by_acc[:4] if acc > 0.85 ]
-    logd( f'Now cull anything under 85% acc: {options}' )
-    options = [ theme for theme,acc in options ]
-    logd( f'Now strip to just names: {options}' )
-    options = { theme: theme_priorities.get( theme, 0 ) for theme in options }
-    logd( f'Now pair with priority: {options}' )
-    options = sorted( options, key=options.get, reverse=True )
-    logd( f'Now sorted by priority {options}' )
+        'The Forgotten':100,
+        'The Outcast':80,
+        'The Unloving':70,
+        'Emotional Repression':100,
+        'Flat-broke Gamblers': 60,
 
+        'Degraded Gloom':100, # Blubbering Toad
+        'Sunk Gloom':99,
+        'Emotional Judgement':98,
+        'Sinking Pang':97,
+        'Crushers & Breakers':96,
+
+        'Slicers & Dicers': 65, # Wayward Passenger + Distorted Bamboo-hatted Kim |6|
+        'Emotional Craving':63, # Wayward Passenger + Fairy-Long-Legs |5|
+        'Insignificant Envy':40, # Wayward Passenger + kqe-1j-23 + Shock Centipede |6|
+        'Pitiful Envy':39, # Wayward Passenger + kqe-1j-23 + Shock Centipede |7|
+
+        'Emotional Indolence':49, # Golden Apple
+
+        'Automated Factory':-28, # Hurtily
+        'Vain Pride':-29,
+        'Tyrannical Pride':-30,
+        
+        'To Be Cleaved':-45, # Ardor Blossom Moth
+        'Emotional Flood':-47,
+        'Burning Haze':-50,
+        'Season of the Flame':-51,
+        
+        } # 0 is the default for themes not given a priority
+    
+    # Determine best theme based on accuracy of identification, theme priority, and shadow status
+    options = {} # Name -> { acc, prio, is_shadow }
+    for name, acc in sorted_by_acc[:4]:
+        if name.endswith( '.Shadow' ):
+            base_name = name[:-7]
+            is_shadow = True
+        else:
+            base_name = name
+            is_shadow = False
+        prio = theme_priorities.get( base_name, 0 )
+        if acc < 0.85: continue
+        if is_shadow: prio += 1000 # always take a Shadow so we can unlock it
+        options[ name ] = { 'acc':acc, 'prio':prio, 'is_shadow':is_shadow }
+    best = sorted( options.items(), key=lambda x: x[1]['prio'], reverse=True )
+
+    # Log selection stats
+    imperfect = len( [ 1 for _name,data in best if data['prio'] != 0 and not data['is_shadow'] ] ) < 4
+    log_stats( f"Theme for floor {floor}{' [imperfect]' if imperfect else ''}", {k:f"{'S ' if v['is_shadow'] else ''}{v['prio']} {(v['acc']*100):.3f}%" for k,v in best} )
+
+    # Try perform drag on best options in order, try refresh, try blind drag
     logd( 'Now actually performing drag on best options in order' )
     #return control_wait_for_human()
-    for name in options:
+    for name, _data in best:
         template = f'mirror/mirror4/jmr_theme/{name}'
         logd( f'Trying theme {name}' )
         click_drag( template, Vec2(0,300) )
         if not has( 'mirror/mirror4/way/ThemePack/SelectFloor' ) or not has( 'mirror/mirror4/way/ThemePack/ThemePack' ):
+            st.current_floor_theme = name
             return
     else: # no drags worked or there weren't an valid options in the first place
         if refresh_available:
-            loge( f'Failed to drag any of {len(options)} options. Trying refresh' )
-            return mirror_theme( refresh_available=False )
+            loge( f'Failed to drag any of {len(best)} options. Trying refresh' )
+            return mirror_theme( floor, refresh_available=False )
         else:
-            loge( f'Failed to drag any of {len(options)} options. Refresh already used. Trying blind drag' )
+            loge( f'Failed to drag any of {len(best)} options. Refresh already used. Trying blind drag' )
             input_mouse_drag( Vec2( 325, 250 ), Vec2( 325, 250+300 ), wait=2.0 )
     if has( 'mirror/mirror4/way/ThemePack/SelectFloor' ) and has( 'mirror/mirror4/way/ThemePack/ThemePack' ):
         raise TimeoutError( "Failed to find a valid theme, including randoming somehow" )
@@ -1003,14 +1040,16 @@ def job_mirror( max_error_unknowns_count=10 ):
     error_zoom_count = 0
     error_unknowns_count = 0
     time_mirror_start = time.time()
+    time_foor_start = time.time()
 
     st.stats_battle_rounds = 0
     st.stats_events_num = 0
     while not st.paused:
         reload_mod()
         should_reset_error_unknowns = True
-        time_so_far = ( time.time() - time_mirror_start ) / 60 # minutes
-        logd( f'{time_so_far:.1f}m. floor {num_seen_floors}/4. record {st.stats_mirror_successes}W-{st.stats_mirror_failures}L / {st.stats_mirror_started}' )
+        time_run_so_far = ( time.time() - time_mirror_start ) / 60 # minutes
+        time_floor_so_far = ( time.time() - time_foor_start ) / 60 # minutes
+        logd( f'{time_run_so_far:.1f}m. floor {num_seen_floors}/4. record {st.stats_mirror_successes}W-{st.stats_mirror_failures}L / {st.stats_mirror_started}' )
 
         if has( 'initMenu/drive' ):
             logd( 'Drive into mirror dungeon' )
@@ -1066,10 +1105,10 @@ def job_mirror( max_error_unknowns_count=10 ):
             press( 'ENTER', wait=2.0 ) # acquire lunacy
             press( 'ENTER', wait=2.0 ) # pass level up (long animation)
 
-            log_stats( 'Run Stats', {
-                'wins':st.stats_mirror_successes, 'losses':st.stats_mirror_failures, 'starts':st.stats_mirror_started,
-                'duration':f'{time_so_far:.1f}', 'nodes':num_routed_nodes, 'rounds':st.stats_battle_rounds,
-                'events':st.stats_events_num, 'floors':num_seen_floors
+            log_stats( 'Run complete - stats', {
+                'wins':st.stats_mirror_successes, 'losses':st.stats_mirror_failures, 'run time':f'{time_run_so_far:.1f}',
+                'floor time':f'{time_floor_so_far:.1f}', 'floor':num_seen_floors, 'theme':st.current_floor_theme,
+                'nodes':num_routed_nodes, 'events':st.stats_events_num,  'rounds':st.stats_battle_rounds,
                 } )
 
             if find( 'initMenu/Window' ): break
@@ -1083,14 +1122,15 @@ def job_mirror( max_error_unknowns_count=10 ):
             num_routed_nodes += 1
             mirror_route_floor() if st.ai_routing else control_wait_for_human()
         elif has( 'mirror/mirror4/way/ThemePack/SelectFloor' ) and has( 'mirror/mirror4/way/ThemePack/ThemePack' ):
-            logd( 'Selecting floor' )
-            mirror_theme() if st.ai_themes else control_wait_for_human()
             num_seen_floors += 1
-            log_stats( 'Run Stats', {
-                'wins':st.stats_mirror_successes, 'losses':st.stats_mirror_failures, 'starts':st.stats_mirror_started,
-                'duration':f'{time_so_far:.1f}', 'nodes':num_routed_nodes, 'rounds':st.stats_battle_rounds,
-                'events':st.stats_events_num, 'floors':num_seen_floors
+            logd( f'Selecting for floor {num_seen_floors}' )
+            mirror_theme( num_seen_floors ) if st.ai_themes else control_wait_for_human()
+            log_stats( 'New floor - stats', {
+                'wins':st.stats_mirror_successes, 'losses':st.stats_mirror_failures, 'run time':f'{time_run_so_far:.1f}',
+                'floor time':f'{time_floor_so_far:.1f}', 'floor':num_seen_floors, 'theme':st.current_floor_theme,
+                'nodes':num_routed_nodes, 'events':st.stats_events_num,  'rounds':st.stats_battle_rounds,
                 } )
+            time_foor_start = time.time()
         elif has( 'event/Skip' ):
             logd( 'Event' )
             event_resolve()
@@ -1135,8 +1175,8 @@ def job_mirror( max_error_unknowns_count=10 ):
                 raise TimeoutError( f'Too long in unknown state. Errors {error_unknowns_count}' )
         if should_reset_error_unknowns: error_unknowns_count = 0
         sleep(1.0)
-    time_so_far = ( time.time() - time_mirror_start ) / 60 # minutes
-    logd( f'end - {time_so_far:.1f}m. floor {num_seen_floors}/4. record {st.stats_mirror_successes}W-{st.stats_mirror_failures}L / {st.stats_mirror_started}' )
+    time_run_so_far = ( time.time() - time_mirror_start ) / 60 # minutes
+    logd( f'end - {time_run_so_far:.1f}m. floor {num_seen_floors}/4. record {st.stats_mirror_successes}W-{st.stats_mirror_failures}L / {st.stats_mirror_started}' )
 
 def job_resolve_until_home(): # True succeeded, False failed, None yieled for pause
     logi( 'start' )
@@ -1305,8 +1345,13 @@ def main():
     
     try:
         win_init()
+        log_discord_clear()
         thread_cap.start()
         thread_main()
+    except KeyboardInterrupt:
+        loge( 'Killed by SIGINT' )
+    except Exception as e:
+        logc( f'Killed by unexpected: {e}' )
     finally:
         win_cleanup()
         st.halt = True
