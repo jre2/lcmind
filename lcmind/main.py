@@ -551,7 +551,7 @@ def job_claim_battlepass():
     
     st.daily_exp_incomplete = find( 'prize/IncompleteDailyExp' ) is not None
     st.daily_thread_incomplete = find( 'prize/IncompleteDailyThread' ) is not None
-    logd( f'Daily completion status: exp={st.daily_exp_incomplete} thread={st.daily_thread_incomplete}' )
+    logd( f'Daily incompletion status: exp={st.daily_exp_incomplete} thread={st.daily_thread_incomplete}' )
     click( 'prize/Weekly' )
     pos = Vec2(520,240)
     for i in range(5):
@@ -900,12 +900,27 @@ def mirror_theme( floor, refresh_available=True ):
     best = sorted( options.items(), key=lambda x: x[1]['prio'], reverse=True )
 
     # Log selection stats
-    imperfect = len( [ 1 for _name,data in best if data['prio'] != 0 and not data['is_shadow'] ] ) < 4
-    log_stats( f"Theme for floor {floor}{' [imperfect]' if imperfect else ''}", {k:f"{'S ' if v['is_shadow'] else ''}{v['prio']} {(v['acc']*100):.3f}%" for k,v in best} )
+    #NOTE sometimes we're only offered 3 packs, so imperfect_data can false positive
+    imperfect_data = len( [ 1 for _name,data in best if data['prio'] != 0 and not data['is_shadow'] ] ) < 4
+    log_stats( f"Theme for floor {floor}{' [imperfect]' if imperfect_data else ''}", {k:f"{'S ' if v['is_shadow'] else ''}{v['prio']} {(v['acc']*100):.3f}%" for k,v in best} )
+
+    # Some potential workarounds in case there's no good options available
+    num_acceptable = len( [ 1 for _name,data in best if data['prio'] > 0 ] )
+    num_unknowns = 3 - len( best ) # there's always 3-4 packs available, but must assume only 3
+    if num_acceptable == 0:
+        if refresh_available:
+            logd( 'No acceptable themes. Attempting refresh' )
+            click( 'mirror/mirror4/theme/refresh', wait=3.0 )
+            return mirror_theme( floor, refresh_available=False )
+        elif num_unknowns > 0:
+            logd( 'No acceptable themes or refresh. Attempting random selection' )
+            best = [] # clearing effectively forces random
+        else:
+            logd( 'No acceptable themes or refresh or unknowns. Choosing least bad' )
 
     # Try perform drag on best options in order, try refresh, try blind drag
     logd( 'Now actually performing drag on best options in order' )
-    #return control_wait_for_human()
+    
     for name, _data in best:
         template = f'mirror/mirror4/jmr_theme/{name}'
         logd( f'Trying theme {name}' )
@@ -916,35 +931,11 @@ def mirror_theme( floor, refresh_available=True ):
     else: # no drags worked or there weren't an valid options in the first place
         if refresh_available:
             loge( f'Failed to drag any of {len(best)} options. Trying refresh' )
+            click( 'mirror/mirror4/theme/refresh', wait=3.0 )
             return mirror_theme( floor, refresh_available=False )
         else:
             loge( f'Failed to drag any of {len(best)} options. Refresh already used. Trying blind drag' )
             input_mouse_drag( Vec2( 325, 250 ), Vec2( 325, 250+300 ), wait=2.0 )
-    if has( 'mirror/mirror4/way/ThemePack/SelectFloor' ) and has( 'mirror/mirror4/way/ThemePack/ThemePack' ):
-        raise TimeoutError( "Failed to find a valid theme, including randoming somehow" )
-
-def __mirror_theme_old():
-    for i in range(2):
-        if find( 'mirror/mirror4/theme/EventTheme' ):
-            logi('Found event theme')
-            return click_drag( 'mirror/mirror4/theme/EventTheme', Vec2(0,300) )
-        for i in range(1,41+1):
-            if st.paused: return
-            template= f'mirror/mirror4/theme/{i}'
-            try:
-                if find( template, timeout=0.1 ):
-                    logd( f'Found theme {i}' )
-                    return click_drag( template, Vec2(0,300) )
-            except FileNotFoundError:
-                logt( f'Disabled or no file for theme {i}' )
-            logt( f'..theme {i} not found' )
-        logd( 'Failed to locate a valid theme in first pass, trying again' )
-        if i == 0: click( 'mirror/mirror4/theme/refresh' )
-
-    loge( 'Attemping last ditch effort to find a theme via blind drag' )
-    #if click( 'mirror/mirror4/theme/LBIcon', can_fail=True ): return # removed due to false positives
-
-    input_mouse_drag( Vec2( 325, 250 ), Vec2( 325, 250+300 ), wait=2.0 )
     if has( 'mirror/mirror4/way/ThemePack/SelectFloor' ) and has( 'mirror/mirror4/way/ThemePack/ThemePack' ):
         raise TimeoutError( "Failed to find a valid theme, including randoming somehow" )
 
