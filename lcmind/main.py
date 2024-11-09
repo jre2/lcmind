@@ -864,7 +864,13 @@ def mirror_theme( floor, refresh_available=True ):
         'Sunk Gloom':99,
         'Emotional Judgement':98,
         'Sinking Pang':97,
-        'Crushers & Breakers':96,
+        'Crushers & Breakers':96, # Blubbering Toad + Papa Bongy + Brazen Bull - Tearful
+
+        "Emotional Seduction":70, # Papa Bongy
+        "Hell's Chicken":69, # Papa Bongy
+        'Dizzying Waves':68, # Papa Bongy + Fairy Gentleman
+        'Repressed Wrath':67, # Papa Bongy + Skin Prophet + Brazier Bull - Tearful
+        
 
         'Slicers & Dicers': 65, # Wayward Passenger + Distorted Bamboo-hatted Kim |6|
         'Emotional Craving':63, # Wayward Passenger + Fairy-Long-Legs |5|
@@ -903,6 +909,8 @@ def mirror_theme( floor, refresh_available=True ):
     #NOTE sometimes we're only offered 3 packs, so imperfect_data can false positive
     imperfect_data = len( [ 1 for _name,data in best if data['prio'] != 0 and not data['is_shadow'] ] ) < 4
     log_stats( f"Theme for floor {floor}{' [imperfect]' if imperfect_data else ''}", {k:f"{'S ' if v['is_shadow'] else ''}{v['prio']} {(v['acc']*100):.3f}%" for k,v in best} )
+
+    if imperfect_data: return control_wait_for_human() #FIXME remove for debug
 
     # Some potential workarounds in case there's no good options available
     num_acceptable = len( [ 1 for _name,data in best if data['prio'] > 0 ] )
