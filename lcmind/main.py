@@ -32,11 +32,7 @@ battle_prepare_team: incorrectly identifies 3/5 team as 5/5, alerts 5/5 as under
 job_stamina_buy_with_lunacy: stops at 7 resets when should be 9
 claim_battlepass: sometimes click gets missed, so there might be outstanding claims
 '''
-'''Win-Loss records for various themes, for pseudo Poise team
-1-0 Degraded Gloom [34]
-1-0 Sinking Pang
-0-1 To be Cleaved (fire bird boss)
-'''
+
 ################################################################################
 ## Defy organization
 ################################################################################
@@ -45,8 +41,12 @@ claim_battlepass: sometimes click gets missed, so there might be outstanding cla
 class State:
     # Config
         # strategy
-    ai_team_mirror_sinner_priority: list[str] = ('Don Quixote', 'Ryoushu', 'Outis', 'Yi Sang', 'Rodion', 'Hong Lu', 'Faust', 'Heathcliff', 'Ishmael', 'Sinclair', 'Meursult', 'Gregor')
-    ai_team_lux_sinner_priority: list[str] = ('Don Quixote', 'Ryoushu', 'Outis', 'Yi Sang', 'Rodion', 'Hong Lu', 'Faust', 'Heathcliff', 'Ishmael', 'Sinclair', 'Meursult', 'Gregor')
+            # blunt
+    ai_team_mirror_sinner_priority: list[str] = ( 'Ryoushu', 'Outis', 'Sinclair', 'Yi Sang', 'Rodion', 'Heathcliff', 'Hong Lu', 'Faust',  'Don Quixote', 'Ishmael', 'Meursult', 'Gregor' )
+    ai_team_lux_sinner_priority: list[str] = ( 'Ryoushu', 'Outis', 'Sinclair', 'Yi Sang', 'Rodion', 'Heathcliff', 'Hong Lu', 'Faust',  'Don Quixote', 'Ishmael', 'Meursult', 'Gregor' )
+            # poise
+    #ai_team_mirror_sinner_priority: list[str] = ('Don Quixote', 'Ryoushu', 'Outis', 'Yi Sang', 'Rodion', 'Hong Lu', 'Faust', 'Heathcliff', 'Ishmael', 'Sinclair', 'Meursult', 'Gregor')
+    #ai_team_lux_sinner_priority: list[str] = ('Don Quixote', 'Ryoushu', 'Outis', 'Yi Sang', 'Rodion', 'Hong Lu', 'Faust', 'Heathcliff', 'Ishmael', 'Sinclair', 'Meursult', 'Gregor')
     stamina_daily_resets: int = 9
     
     mirror_decline_partial_rewards: bool = True # anything less than 100% is considered a failure/partial
@@ -818,46 +818,13 @@ def mirror_theme( floor, refresh_available=True ):
         template = f'mirror/mirror4/jmr_theme/{name}'
         themes[ name ] = has_acc( template )
     sorted_by_acc = sorted( themes.items(), key=lambda x:x[1], reverse=True )
-    #log_stats( 'Theme accuracies (new ver)', sorted_by_acc[:6] )
-    # lowest correct 98.5%, highest incorrect 50.7% run 1 floor 1
-    # lowest correct 91.3%, highest incorrect 68.9% run 1 floor 2
-    # lowest correct 92.7%, highest incorrect 51.5% run 1 floor 3. P&Pv1 92.7, P&Pv2 99.4
-    # lowest correct 99.4%, highest incorrect 58.9% run 1 floor 4
-    # lowest correct 85.3%/96.3%, highest incorrect 73.5% run 2 floor 1, 85->98% on 2nd check
-    # lowest correct 91.3%, highest incorrect 72.4% run 2 floor 2. first run was awful (63-88%). added delay to fix
-    # lowest correct 98.4%, highest incorrect 65.3% run 2 floor 3
-    # lowest correct 98.1%, highest incorrect 65.2% run 2 floor 4
-    # lowest correct 96.1%, highest incorrect 74.2% run 3 floor 1
-    # lowest correct 91.3%, highest incorrect 70.8% run 3 floor 2
-    # lowest correct 98.2%, highest incorrect 51.4% run 3 floor 3
-    
-    if 0:
-        logd( 'Info about old theme logic' )
-        themes = {}
-        for i in range(1,41+1):
-            template= f'mirror/mirror4/theme/{i}'
-            try:
-                themes[ i ] = has_acc( template )
-            except FileNotFoundError:
-                themes[ i ] = -1 # disabled or no file
-        sorted_by_acc_old = sorted( themes.items(), key=lambda x:x[1], reverse=True )
-        #log_stats( 'Theme accuracies (old ver)', sorted_by_acc_old[:6] )
-    # lowest correct 86.7%, highest incorrect 76.2% run 1 floor 1
-    # lowest correct 94.2%, highest incorrect 74.9% run 1 floor 2
-    # lowest correct ----%, highest incorrect 68.2% run 1 floor 3
-    # lowest correct 88.6%, highest incorrect 70.5% run 1 floor 4
-    # lowest correct 93.7%, highest incorrect 76.3% run 2 floor 1
-    # lowest correct 94.2%, highest incorrect 74.9% run 2 floor 2
-    # lowest correct 85.9%, highest incorrect 70.5% run 2 floor 4
-    # lowest correct 86.7%, highest incorrect 76.2% run 3 floor 1
-    # lowest correct 76.8%, highest incorrect 68.3% run 3 floor 3 # 76.8 for correct but shadowed
     
     logd( 'Priority based selection method' )
     theme_priorities = {
         'The Forgotten':100,
         'The Outcast':80,
         'The Unloving':70,
-        'Emotional Repression':100,
+        'Emotional Repression':100, # Santata + Ambling Pearl + So That No One Will Cry |5|
         'Flat-broke Gamblers': 60,
 
         'Degraded Gloom':100, # Blubbering Toad
@@ -866,24 +833,38 @@ def mirror_theme( floor, refresh_available=True ):
         'Sinking Pang':97,
         'Crushers & Breakers':96, # Blubbering Toad + Papa Bongy + Brazen Bull - Tearful
 
-        "Emotional Seduction":70, # Papa Bongy
-        "Hell's Chicken":69, # Papa Bongy
-        'Dizzying Waves':68, # Papa Bongy + Fairy Gentleman
-        'Repressed Wrath':67, # Papa Bongy + Skin Prophet + Brazier Bull - Tearful
+        "Emotional Seduction":80, # Papa Bongy
+        "Hell's Chicken":79, # Papa Bongy
+        'Dizzying Waves':78, # Papa Bongy + Fairy Gentleman
+        'Repressed Wrath':77, # Papa Bongy + Skin Prophet + Brazier Bull - Tearful
+
+        'Treadwheel Sloth':76, # Dream-Devouring Siltcurrent + Drifting Fox |6|
+        'Crawling Abyss':75, # Dream-Devouring Siltcurrent + Ambling Pearl + Skin Prophet |6|
+
+        'Deep Sigh':70, # Santat + Steam Transport Machine
+        'Devoured Gluttony':69, # Fairy Gentleman + Ambling Pearl + Faelantern |6|
+        'To Be Pierced':68, # Fairy Gentleman + King Trash Crab + Drifting Fox |5|
+        'Emotional Subservience':66, # Fairy Gentleman + Drenched Gossypium + Faelantern |5|
+        
+        'Emotional Craving':60, # Fairy-Long-Legs + Wayward Passenger |5|
+        'Trickled Sanguine Blood':59, # Fairy-Long-Legs + Headless Ichthys + Drenched Gossypium |6|
+        'Addicting Lust':56, # Fairy-Long-Legs + Clippity-cloppity? Tap Away! + So That No One Will Cry |6|
+
+        'Rising Power Supply':55, # kqe-1j-23 + Shock Centipede |7|
+        'Slicers & Dicers': 54, # Wayward Passenger + Distorted Bamboo-hatted Kim |6|
+        'Insignificant Envy':51, # Wayward Passenger + kqe-1j-23 + Shock Centipede |6|
+        'Pitiful Envy':50, # Wayward Passenger + kqe-1j-23 + Shock Centipede |7|
         
 
-        'Slicers & Dicers': 65, # Wayward Passenger + Distorted Bamboo-hatted Kim |6|
-        'Emotional Craving':63, # Wayward Passenger + Fairy-Long-Legs |5|
-        'Insignificant Envy':40, # Wayward Passenger + kqe-1j-23 + Shock Centipede |6|
-        'Pitiful Envy':39, # Wayward Passenger + kqe-1j-23 + Shock Centipede |7|
-
         'Emotional Indolence':49, # Golden Apple
+
+        'Crushing External Force':30, # So That No One Will Cry + Alleyway Watchdog + Faelantern |6|
 
         'Automated Factory':-28, # Hurtily
         'Vain Pride':-29,
         'Tyrannical Pride':-30,
         
-        'To Be Cleaved':-45, # Ardor Blossom Moth
+        'To Be Cleaved':-45, # Ardor Blossom Moth + Fairy-Long-Legs + Faelantern |5|
         'Emotional Flood':-47,
         'Burning Haze':-50,
         'Season of the Flame':-51,
@@ -910,7 +891,7 @@ def mirror_theme( floor, refresh_available=True ):
     imperfect_data = len( [ 1 for _name,data in best if data['prio'] != 0 and not data['is_shadow'] ] ) < 4
     log_stats( f"Theme for floor {floor}{' [imperfect]' if imperfect_data else ''}", {k:f"{'S ' if v['is_shadow'] else ''}{v['prio']} {(v['acc']*100):.3f}%" for k,v in best} )
 
-    if imperfect_data: return control_wait_for_human() #FIXME remove for debug
+    #if imperfect_data: return control_wait_for_human() #FIXME remove for debug
 
     # Some potential workarounds in case there's no good options available
     num_acceptable = len( [ 1 for _name,data in best if data['prio'] > 0 ] )
@@ -958,13 +939,16 @@ def mirror_choose_encounter_reward():
         click( 'mirror/mirror4/way/Confirm', can_fail=True ) # confirm ego
     elif click( 'mirror/mirror4/way/RewardCard/EGOGiftCard', can_fail=True ):
         press( 'ENTER' )
-        click( 'mirror/mirror4/way/Confirm' ) # confirm ego
+        click( 'mirror/mirror4/way/Confirm', can_fail=True ) # confirm ego
     elif click( 'mirror/mirror4/way/RewardCard/CostCard', can_fail=True ):
         press( 'ENTER' )
     elif click( 'mirror/mirror4/way/RewardCard/StarlightCard', can_fail=True ):
         press( 'ENTER' )
     elif click( 'mirror/mirror4/way/RewardCard/EGOResourceCard', can_fail=True ):
         press( 'ENTER' )
+    elif has( 'mirror/mirror4/way/Confirm' ):
+        press( 'ENTER' )
+        click( 'mirror/mirror4/way/Confirm', can_fail=True ) # confirm ego
     else:
         raise TimeoutError( 'Failed to find valid reward card' )
         # alternatively, blindly press enter and hope for the best
@@ -982,8 +966,8 @@ def mirror_choose_ego_gift():
         press( 'ENTER' )
 
 def mirror_starting_gifts():
-    logd( 'Using Poise gift strategy' )
-    click( 'mirror/mirror4/gift/Poise/Poise' )
+    logd( 'Using Blunt gift strategy' )
+    click( 'mirror/mirror4/gift/Blunt/Blunt' )
     input_mouse_click( Vec2( 980, 280 ), wait=0.3 )
     input_mouse_click( Vec2( 980, 380 ), wait=0.3 )
     input_mouse_click( Vec2( 980, 480 ), wait=0.3 )
