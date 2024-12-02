@@ -1,4 +1,5 @@
 import copy
+import colorama
 import ctypes
 from   ctypes import windll
 import ctypes.wintypes
@@ -624,12 +625,18 @@ def battle_prepare_team( battle_team_type_mirror:bool|None = None ):
 
     # Now start battle
     press( 'ENTER' )
+    click( 'mirror/mirror5/PrepareTeamToBattle', can_fail=True )
 
     # Wait for battle to load
     logd( 'waiting for battle to load' )
     while not detect_battle_combat() and not st.paused:
-        if detect_loading(): logd( 'loading...' )
-        else: logw( 'unknown state' ) #TODO consider pressing ENTER if stuck
+        if detect_loading():
+            logd( 'loading...' )
+        elif detect_battle_prepare():
+            logw( 'unexpectedly still at team select, clicking to battle again' )
+            click( 'mirror/mirror5/PrepareTeamToBattle', can_fail=True )
+        else:
+            logw( 'unknown state' )
         sleep(1.0)
     
     logi( 'Battle is loaded' )
@@ -652,6 +659,7 @@ def battle_combat( battle_state_unknown_timeout=5 ):
             press( 'ENTER' )
             if click( 'battle/WinRate', can_fail=True ):
                 press( 'ENTER' )
+            click( 'mirror/mirror5/BattleOrdersSubmit', can_fail=True )
             error_count = 0
         elif has( 'battle/battlePause' ):
             logt( 'animating turn...' )
@@ -1358,6 +1366,7 @@ st = State()
 win = Window()
 
 def main():
+    colorama.just_fix_windows_console()
     st.log_app_start_time = log_time()
     thread_cap = threading.Thread( target=thread_video_log )
     
