@@ -31,6 +31,9 @@ event_resolve: bespoke choices seem fragile. changed logic to reflect event_choi
 battle_prepare_team: incorrectly identifies 3/5 team as 5/5, alerts 5/5 as undermanned (maybe fixed?)
 job_stamina_buy_with_lunacy: stops at 7 resets when should be 9
 claim_battlepass: sometimes click gets missed, so there might be outstanding claims
+
+Mirror 5 update:
+    - new detection for whether we're undermanned. look for 12/12 in team prep screen
 '''
 
 ################################################################################
@@ -614,8 +617,8 @@ def battle_prepare_team( battle_team_type_mirror:bool|None = None ):
             idx = sinners_in_order.index( sinner_name )
             rel_pos = Vec2( (idx % 6 +1)* 140, (idx//6)*200 + 100 )
             input_mouse_click( Vec2(pos.x+rel_pos.x, pos.y+rel_pos.y) )
-        if not find( full_template, threshold=0.96 ):
-            loge( "Team seems to be undermanned. Either we're losing or detection is flawed" )
+        #if not find( full_template, threshold=0.96 ): # no longer applies with mirror 5 system
+        #    loge( "Team seems to be undermanned. Either we're losing or detection is flawed" )
     else:
         logd( 'Team is already prepared' )
 
@@ -806,6 +809,17 @@ def mirror_shop_buy():
     click( 'event/Leave' )
     click( 'mirror/mirror4/whiteConfirm' )
 
+def mirror_shop_shop():
+    logd( 'Shop' )
+    if find( 'mirror/mirror5/HealSinner' ):
+        click( 'mirror/mirror5/HealSinner' )
+        click( 'mirror/mirror5/HealAllSinners' )
+        #TODO handle error
+        click( 'mirror/mirror5/Return' )
+    #TODO attempt to buy egos
+    click( 'event/Leave' )
+    click( 'mirror/mirror4/whiteConfirm' )
+
 def mirror_theme( floor, refresh_available=True ):
     st.current_floor_theme = None
     logd( f'Identifying theme packs for floor {floor}' )
@@ -966,8 +980,8 @@ def mirror_choose_ego_gift():
         press( 'ENTER' )
 
 def mirror_starting_gifts():
-    logd( 'Using Blunt gift strategy' )
-    click( 'mirror/mirror4/gift/Blunt/Blunt' )
+    logd( 'Using Poise gift strategy' )
+    click( 'mirror/mirror4/gift/Poise/Poise' )
     input_mouse_click( Vec2( 980, 280 ), wait=0.3 )
     input_mouse_click( Vec2( 980, 380 ), wait=0.3 )
     input_mouse_click( Vec2( 980, 480 ), wait=0.3 )
@@ -1037,7 +1051,7 @@ def job_mirror( max_error_unknowns_count=10 ):
         if has( 'initMenu/drive' ):
             logd( 'Drive into mirror dungeon' )
             click( 'initMenu/drive' )
-            click( 'mirror/mirror4/MirrorDungeons' )
+            click( 'mirror/mirror5/MirrorDungeons' )
             if find( 'mirror/previousClaimReward' ):
                 logi( 'Prior run has rewards to claim' )
                 press( 'ENTER' )
@@ -1046,13 +1060,16 @@ def job_mirror( max_error_unknowns_count=10 ):
                     click( 'mirror/mirror4/GiveUpRewards' )
                 else:
                     logi( 'Accepting previous run rewards' )
-                    click( 'mirror/mirror4/ClaimRewardsStep2' )
-                press( 'ENTER' )
+                    #click( 'mirror/mirror4/ClaimRewardsStep2' )
+                    click( 'mirror/mirror5/ClaimRewardSpend' )
+                if find( 'mirror/mirror5/SpendWeeklyBonus' ):
+                    click( 'mirror/mirror5/SpendWeeklyBonusConfirm' )
+                    #press( 'ENTER' ) # popup to spend weekly
                 press( 'ENTER', wait=2.0 ) # acquire lunacy
                 press( 'ENTER', wait=2.0 ) # pass level up (long animation)
-        elif has( 'mirror/mirror4/mirror4Normal' ):
+        elif has( 'mirror/mirror5/MirrorNormal' ):
             logd( 'Enter MD normal' )
-            click( 'mirror/mirror4/mirror4Normal' )
+            click( 'mirror/mirror5/MirrorNormal' )
             if find( 'mirror/MirrorInProgress' ):
                 logc( 'Blindly accepting mirror in progress. Please verify video log' )
                 press( 'ENTER' )
@@ -1064,6 +1081,18 @@ def job_mirror( max_error_unknowns_count=10 ):
         elif has( 'mirror/mirror4/gift/Poise/Poise' ):
             logd( 'Choose starting gifts' )
             mirror_starting_gifts() if st.ai_starting_gifts else control_wait_for_human()
+        elif has( 'mirror/mirror5/GraceOfTheDreamingStar' ) and not has( 'mirror/mirror5/SelectGraceOfStars' ):
+            logd( 'Choose starting passives' )
+            #click( 'mirror/mirror5/PerfectedPossibility' )
+            locs = [ Vec2(500+i*200,240) for i in range(4) ] + [ Vec2(500+i*200,480) for i in range(4) ]
+            for loc in locs:
+                input_mouse_click( loc )
+            click( 'mirror/mirror5/ChoosePassivesEnter' )
+        elif has( 'mirror/mirror5/SelectGraceOfStars' ):
+            logd( 'Confirming starting passives' )
+            click( 'mirror/mirror5/SelectGraceOfStarsConfirm' )
+        elif has( 'mirror/mirror5/Shop' ):
+            mirror_shop_shop()
         elif detect_loading():
             logt( 'loading...' )
         elif has( 'mirror/mirror4/ClaimRewards' ):
@@ -1073,7 +1102,8 @@ def job_mirror( max_error_unknowns_count=10 ):
                 logi( 'Win detected' )
                 st.stats_mirror_successes += 1
                 click( 'mirror/mirror4/ClaimRewards' ) # 85.7%
-                click( 'mirror/mirror4/ClaimRewardsStep2' ) # 99.4%
+                #click( 'mirror/mirror4/ClaimRewardsStep2' ) # 99.4%
+                click( 'mirror/mirror5/ClaimRewardSpend' )
             else:
                 loge( 'Loss detected' )
                 st.stats_mirror_failures += 1
@@ -1082,9 +1112,12 @@ def job_mirror( max_error_unknowns_count=10 ):
                     loge( 'Declining rewards' )
                     click( 'mirror/mirror4/GiveUpRewards' ) # 89.8%
                 else:
-                    click( 'mirror/mirror4/ClaimRewardsStep2' ) # 99.4%
+                    #click( 'mirror/mirror4/ClaimRewardsStep2' ) # 99.4%
+                    click( 'mirror/mirror5/ClaimRewardSpend' )
 
-            press( 'ENTER' ) # popup to spend weekly
+            if find( 'mirror/mirror5/SpendWeeklyBonus' ):
+                click( 'mirror/mirror5/SpendWeeklyBonusConfirm' )
+            #press( 'ENTER' ) # popup to spend weekly
             press( 'ENTER', wait=2.0 ) # acquire lunacy
             press( 'ENTER', wait=2.0 ) # pass level up (long animation)
 
@@ -1121,10 +1154,10 @@ def job_mirror( max_error_unknowns_count=10 ):
             logd( 'Battle combat' )
             battle_combat()
         elif has( 'team/Announcer', threshold=0.7 ) \
-        and has( 'mirror/mirror4/firstTeamConfirm', threshold=0.6 ) \
-        and not has( 'team/ClearSelection' ): # firstTeamConfirm was 0.5, 0.6 has false positives
+        and has( 'mirror/mirror5/FirstTeamConfirm' ) \
+        and not has( 'team/ClearSelection' ):
             logd( 'Prepare initial team' )
-            press( 'ENTER' ) if st.ai_team_select else control_wait_for_human()
+            click( 'mirror/mirror5/FirstTeamConfirm' ) if st.ai_team_select else control_wait_for_human()
         elif detect_battle_prepare():
             logd( 'Battle prepare' )
             battle_prepare_team( True ) if st.ai_team_select else control_wait_for_human()
@@ -1136,7 +1169,8 @@ def job_mirror( max_error_unknowns_count=10 ):
             mirror_choose_ego_gift() if st.ai_reward_egos else control_wait_for_human()
         elif has( 'mirror/mirror4/way/Confirm' ):
             logd( 'Confirm what I think is an ego gift' )
-            press( 'ENTER' )
+            #press( 'ENTER' )
+            click( 'mirror/mirror5/EgoGiftConfirm' )
         elif has( 'mirror/mirror4/way/Enter' ):
             logd( 'Assume in middle of accepting route node' )
             press( 'ESCAPE' )
@@ -1167,6 +1201,7 @@ def job_resolve_until_home(): # True succeeded, False failed, None yieled for pa
         if   click( 'initMenu/Window', can_fail=True, timeout=0.1 ): return True
         elif click( 'goBack/leftarrow', can_fail=True, timeout=0.1 ): pass
         elif click( 'initMenu/CloseMail', can_fail=True, timeout=0.1 ): pass
+        elif find( 'mirror/mirror5/SpendWeeklyBonus' ): click( 'mirror/mirror5/SpendWeeklyBonusConfirm' )
         elif click( 'initMenu/cancel', can_fail=True, timeout=0.1 ): pass
         elif detect_battle_prepare(): battle_prepare_team()
         elif detect_battle_combat(): battle_combat()
@@ -1327,7 +1362,7 @@ def main():
     thread_cap = threading.Thread( target=thread_video_log )
     
     try:
-        win_init()
+        log_discord_clear(); win_init()
         log_discord_clear()
         thread_cap.start()
         thread_main()
